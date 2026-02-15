@@ -184,6 +184,31 @@ button:disabled {
   min-height: 0;
 }
 
+.doc-view-formatted {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #ece4d4;
+  padding: 8px;
+}
+
+.docx-host {
+  min-height: 360px;
+  max-height: 64vh;
+  overflow: auto;
+  border-radius: 8px;
+  background: #ded4c0;
+  padding: 8px;
+}
+
+.docx-host .docx-wrapper {
+  background: transparent;
+  padding: 4px;
+}
+
+.docx-host .docx-wrapper section.docx {
+  box-shadow: 0 8px 20px rgba(31, 39, 40, 0.2);
+}
+
 .doc-block {
   margin: 0 0 8px;
   line-height: 1.5;
@@ -287,4 +312,3 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 }
-

@@ -15,8 +15,9 @@ Dockerized web app for human-in-the-loop AI editing of Word documents (`.docx`):
 - Frontend: React + TypeScript + Vite
 - Backend: Express + TypeScript
 - Document parsing: `mammoth`
-- Document export: `docx`
+- Document mutation/preservation: `jszip` + OOXML XML patching
 - Diff rendering: `diff`
+- Formatted preview: `docx-preview`
 - AI providers:
   - Anthropic (Claude)
   - Gemini
@@ -53,8 +54,9 @@ docker compose up --build
 ## Notes and Current Constraints
 
 - Source doc support is `.docx` only.
-- Current parser/extractor focuses on raw paragraph text for MVP.
-- Complex Word structures (tables, headers/footers, footnotes, tracked changes) are not preserved in this MVP flow.
+- Exports are generated from the original DOCX package with in-place text edits, preserving document-level structure and styling metadata.
+- Formatted preview is rendered from the real working DOCX in-browser.
+- Inline run-level styling inside heavily edited paragraphs may shift if an edit materially changes run boundaries.
 - Session state is in-memory (single instance, non-persistent).
 
 ## API Endpoints (MVP)
@@ -68,4 +70,3 @@ docker compose up --build
 - `POST /api/session/:id/edits/:editId/decision`
 - `POST /api/session/:id/promote-working`
 - `GET /api/session/:id/download?variant=working|source`
-

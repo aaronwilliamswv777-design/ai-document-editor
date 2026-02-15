@@ -10,6 +10,7 @@ export function createSession(): SessionState {
     createdAt: new Date().toISOString(),
     sourceBlocks: [],
     workingBlocks: [],
+    blockBindings: {},
     contextFiles: [],
     proposalHistory: []
   };

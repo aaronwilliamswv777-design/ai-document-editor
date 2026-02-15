@@ -6,11 +6,11 @@ import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
 import { createSession, deleteSession, getSession, updateSession } from "./sessionStore.js";
 import {
+  applyEditsToDocxBuffer,
   buildDiffHtml,
-  buildDocxFromBlocks,
   extractTextFromDocx,
   extractTextFromGenericContext,
-  parseTextToBlocks
+  parseDocxToBlocks
 } from "./services/documentService.js";
 import { generateEdits } from "./services/aiService.js";
 import { ProposalBatch } from "./types.js";
@@ -43,6 +43,23 @@ function cloneBlocks<T extends { id: string; text: string }>(blocks: T[]): T[] {
   return blocks.map((block) => ({ ...block }));
 }
 
+function cloneBuffer(buffer?: Buffer): Buffer | undefined {
+  if (!buffer) {
+    return undefined;
+  }
+  return Buffer.from(buffer);
+}
+
+function readRouteParam(value: string | string[] | undefined): string {
+  if (!value) {
+    return "";
+  }
+  if (Array.isArray(value)) {
+    return value[0] || "";
+  }
+  return value;
+}
+
 function requireDocx(filename: string): boolean {
   return filename.toLowerCase().endsWith(".docx");
 }
@@ -67,7 +84,7 @@ app.post("/api/session", (_req, res) => {
 });
 
 app.delete("/api/session/:id", (req, res) => {
-  const removed = deleteSession(req.params.id);
+  const removed = deleteSession(readRouteParam(req.params.id));
   if (!removed) {
     return res.status(404).json({ error: "Session not found." });
   }
@@ -76,7 +93,7 @@ app.delete("/api/session/:id", (req, res) => {
 
 app.post("/api/session/:id/upload-source", upload.single("file"), async (req, res) => {
   try {
-    const session = getSession(req.params.id);
+    const session = getSession(readRouteParam(req.params.id));
     if (!session) {
       return res.status(404).json({ error: "Session not found." });
     }
@@ -87,15 +104,17 @@ app.post("/api/session/:id/upload-source", upload.single("file"), async (req, re
       return res.status(400).json({ error: "Only .docx is supported for the source document." });
     }
 
-    const rawText = await extractTextFromDocx(req.file.buffer);
-    const parsedBlocks = parseTextToBlocks(rawText);
-    if (parsedBlocks.length === 0) {
+    const parsed = await parseDocxToBlocks(req.file.buffer);
+    if (parsed.blocks.length === 0) {
       return res.status(400).json({ error: "No editable text found in the uploaded document." });
     }
 
     session.sourceFilename = req.file.originalname;
-    session.sourceBlocks = cloneBlocks(parsedBlocks);
-    session.workingBlocks = cloneBlocks(parsedBlocks);
+    session.sourceBlocks = cloneBlocks(parsed.blocks);
+    session.workingBlocks = cloneBlocks(parsed.blocks);
+    session.blockBindings = { ...parsed.blockBindings };
+    session.sourceDocxBuffer = cloneBuffer(req.file.buffer);
+    session.workingDocxBuffer = cloneBuffer(req.file.buffer);
     session.proposalHistory = [];
     updateSession(session);
 
@@ -112,7 +131,7 @@ app.post("/api/session/:id/upload-source", upload.single("file"), async (req, re
 
 app.post("/api/session/:id/upload-context", upload.single("file"), async (req, res) => {
   try {
-    const session = getSession(req.params.id);
+    const session = getSession(readRouteParam(req.params.id));
     if (!session) {
       return res.status(404).json({ error: "Session not found." });
     }
@@ -150,7 +169,7 @@ app.post("/api/session/:id/upload-context", upload.single("file"), async (req, r
 });
 
 app.get("/api/session/:id/state", (req, res) => {
-  const session = getSession(req.params.id);
+  const session = getSession(readRouteParam(req.params.id));
   if (!session) {
     return res.status(404).json({ error: "Session not found." });
   }
@@ -172,7 +191,7 @@ app.get("/api/session/:id/state", (req, res) => {
 
 app.post("/api/session/:id/propose-edits", async (req, res) => {
   try {
-    const session = getSession(req.params.id);
+    const session = getSession(readRouteParam(req.params.id));
     if (!session) {
       return res.status(404).json({ error: "Session not found." });
     }
@@ -251,9 +270,9 @@ app.post("/api/session/:id/propose-edits", async (req, res) => {
   }
 });
 
-app.post("/api/session/:id/edits/:editId/decision", (req, res) => {
+app.post("/api/session/:id/edits/:editId/decision", async (req, res) => {
   try {
-    const session = getSession(req.params.id);
+    const session = getSession(readRouteParam(req.params.id));
     if (!session) {
       return res.status(404).json({ error: "Session not found." });
     }
@@ -288,6 +307,20 @@ app.post("/api/session/:id/edits/:editId/decision", (req, res) => {
       if (block) {
         block.text = targetEdit.proposedText;
       }
+      if (!session.workingDocxBuffer) {
+        return res.status(400).json({ error: "Working document buffer is missing." });
+      }
+
+      session.workingDocxBuffer = await applyEditsToDocxBuffer({
+        buffer: session.workingDocxBuffer,
+        updates: [
+          {
+            blockId: targetEdit.blockId,
+            text: targetEdit.proposedText
+          }
+        ],
+        bindings: session.blockBindings
+      });
     }
 
     updateSession(session);
@@ -312,13 +345,14 @@ app.post("/api/session/:id/edits/:editId/decision", (req, res) => {
 
 app.post("/api/session/:id/promote-working", (req, res) => {
   try {
-    const session = getSession(req.params.id);
+    const session = getSession(readRouteParam(req.params.id));
     if (!session) {
       return res.status(404).json({ error: "Session not found." });
     }
 
     promoteSchema.parse(req.body);
     session.sourceBlocks = cloneBlocks(session.workingBlocks);
+    session.sourceDocxBuffer = cloneBuffer(session.workingDocxBuffer);
     updateSession(session);
 
     return res.json({
@@ -338,18 +372,17 @@ app.post("/api/session/:id/promote-working", (req, res) => {
 
 app.get("/api/session/:id/download", async (req, res) => {
   try {
-    const session = getSession(req.params.id);
+    const session = getSession(readRouteParam(req.params.id));
     if (!session) {
       return res.status(404).json({ error: "Session not found." });
     }
 
     const variant = req.query.variant === "source" ? "source" : "working";
-    const blocks = variant === "source" ? session.sourceBlocks : session.workingBlocks;
-    if (blocks.length === 0) {
+    const docBuffer = variant === "source" ? session.sourceDocxBuffer : session.workingDocxBuffer;
+    if (!docBuffer) {
       return res.status(400).json({ error: "Document is empty." });
     }
 
-    const buffer = await buildDocxFromBlocks(blocks);
     const baseName = (session.sourceFilename || "document").replace(/\.docx$/i, "");
     const suffix = variant === "source" ? "source" : "edited";
 
@@ -361,12 +394,34 @@ app.get("/api/session/:id/download", async (req, res) => {
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     );
-    return res.send(buffer);
+    res.setHeader("Cache-Control", "no-store");
+    return res.send(docBuffer);
   } catch (error) {
     return res.status(500).json({
       error: error instanceof Error ? error.message : "Failed to download document."
     });
   }
+});
+
+app.get("/api/session/:id/preview", (req, res) => {
+  const session = getSession(readRouteParam(req.params.id));
+  if (!session) {
+    return res.status(404).json({ error: "Session not found." });
+  }
+
+  const variant = req.query.variant === "source" ? "source" : "working";
+  const docBuffer = variant === "source" ? session.sourceDocxBuffer : session.workingDocxBuffer;
+  if (!docBuffer) {
+    return res.status(400).json({ error: "Document is empty." });
+  }
+
+  res.setHeader(
+    "Content-Type",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  );
+  res.setHeader("Content-Disposition", "inline");
+  res.setHeader("Cache-Control", "no-store");
+  return res.send(docBuffer);
 });
 
 app.listen(port, () => {

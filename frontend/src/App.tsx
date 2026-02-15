@@ -1,7 +1,9 @@
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { renderAsync } from "docx-preview";
 import {
   createSession,
   decideEdit,
+  fetchPreviewDoc,
   fetchState,
   promoteWorking,
   proposeEdits,
@@ -26,6 +28,9 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("Creating session...");
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState("");
+  const previewContainerRef = useRef<HTMLDivElement | null>(null);
 
   async function refresh(targetSessionId: string): Promise<void> {
     const next = await fetchState(targetSessionId);
@@ -177,6 +182,50 @@ function App() {
       .filter((edit) => edit.status === "pending").length;
   }, [state]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function renderDocPreview() {
+      const container = previewContainerRef.current;
+      if (!sessionId || !state?.workingBlocks.length || !container) {
+        if (container) {
+          container.innerHTML = "";
+        }
+        setPreviewLoading(false);
+        setPreviewError("");
+        return;
+      }
+
+      try {
+        setPreviewLoading(true);
+        setPreviewError("");
+        const fileBuffer = await fetchPreviewDoc(sessionId, "working");
+        if (cancelled || !previewContainerRef.current) {
+          return;
+        }
+        previewContainerRef.current.innerHTML = "";
+        await renderAsync(fileBuffer, previewContainerRef.current);
+      } catch (renderError) {
+        if (!cancelled) {
+          setPreviewError(
+            renderError instanceof Error
+              ? renderError.message
+              : "Failed to render the Word preview."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setPreviewLoading(false);
+        }
+      }
+    }
+
+    renderDocPreview();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, state]);
+
   return (
     <div className="app">
       <header className="topbar">
@@ -265,12 +314,10 @@ function App() {
           {!state?.workingBlocks.length && (
             <p className="empty">Upload a `.docx` source document to start editing.</p>
           )}
-          <div className="doc-view">
-            {state?.workingBlocks.map((block, idx) => (
-              <p key={block.id} className="doc-block">
-                <span className="block-number">{idx + 1}.</span> {block.text}
-              </p>
-            ))}
+          {previewLoading && <p className="subtle">Rendering formatted preview...</p>}
+          {previewError && <p className="error">{previewError}</p>}
+          <div className="doc-view doc-view-formatted">
+            <div ref={previewContainerRef} className="docx-host" />
           </div>
           {!!state?.contextFiles.length && (
             <div className="context-list">

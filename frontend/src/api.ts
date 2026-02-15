@@ -94,3 +94,16 @@ export function workingDownloadUrl(sessionId: string): string {
   return `${API_BASE}/api/session/${sessionId}/download?variant=working`;
 }
 
+export async function fetchPreviewDoc(
+  sessionId: string,
+  variant: "working" | "source" = "working"
+): Promise<ArrayBuffer> {
+  const response = await fetch(`${API_BASE}/api/session/${sessionId}/preview?variant=${variant}`, {
+    method: "GET",
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw new Error("Failed to load formatted document preview.");
+  }
+  return response.arrayBuffer();
+}

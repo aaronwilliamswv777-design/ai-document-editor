@@ -9,6 +9,11 @@ export type DocumentBlock = {
   text: string;
 };
 
+export type BlockBinding = {
+  partPath: string;
+  paragraphIndex: number;
+};
+
 export type EditStatus = "pending" | "accepted" | "rejected";
 
 export type EditProposal = {
@@ -36,6 +41,9 @@ export type SessionState = {
   sourceFilename?: string;
   sourceBlocks: DocumentBlock[];
   workingBlocks: DocumentBlock[];
+  blockBindings: Record<string, BlockBinding>;
+  sourceDocxBuffer?: Buffer;
+  workingDocxBuffer?: Buffer;
   contextFiles: ContextFile[];
   proposalHistory: ProposalBatch[];
 };
@@ -46,3 +54,7 @@ export type ProposedEditOperation = {
   rationale: string;
 };
 
+export type ParsedDocxBlocks = {
+  blocks: DocumentBlock[];
+  blockBindings: Record<string, BlockBinding>;
+};
