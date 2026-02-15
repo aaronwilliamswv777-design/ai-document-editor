@@ -1,0 +1,32 @@
+{
+  "name": "doc-edit-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "cors": "^2.8.5",
+    "docx": "^9.2.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "@google/generative-ai": "^0.24.1",
+    "diff": "^7.0.0",
+    "mammoth": "^1.8.0",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^11.0.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.8.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

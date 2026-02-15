@@ -1,0 +1,48 @@
+export type ContextFile = {
+  id: string;
+  filename: string;
+  text: string;
+};
+
+export type DocumentBlock = {
+  id: string;
+  text: string;
+};
+
+export type EditStatus = "pending" | "accepted" | "rejected";
+
+export type EditProposal = {
+  id: string;
+  blockId: string;
+  originalText: string;
+  proposedText: string;
+  rationale: string;
+  status: EditStatus;
+  diffHtml: string;
+};
+
+export type ProposalBatch = {
+  id: string;
+  prompt: string;
+  createdAt: string;
+  provider: "anthropic" | "gemini" | "openrouter" | "mock";
+  model: string;
+  edits: EditProposal[];
+};
+
+export type SessionState = {
+  id: string;
+  createdAt: string;
+  sourceFilename?: string;
+  sourceBlocks: DocumentBlock[];
+  workingBlocks: DocumentBlock[];
+  contextFiles: ContextFile[];
+  proposalHistory: ProposalBatch[];
+};
+
+export type ProposedEditOperation = {
+  blockId: string;
+  proposedText: string;
+  rationale: string;
+};
+
