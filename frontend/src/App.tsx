@@ -22,6 +22,7 @@ import {
 import { ProposalBatch, SessionState } from "./types";
 
 type EditMode = "custom" | "grammar";
+type TopMenu = "editor" | "settings";
 type ProviderKeyMap = Record<Provider, string>;
 type ProviderModelMap = Record<Provider, Array<{ id: string; label?: string }>>;
 type PersistedPreferences = {
@@ -31,6 +32,7 @@ type PersistedPreferences = {
 };
 const PREFERENCES_STORAGE_KEY = "doc-edit.preferences.v1";
 const REMEMBER_SETTINGS_KEY = "doc-edit.remember-settings.v1";
+const MODEL_CATALOG_STORAGE_KEY = "doc-edit.model-catalog.v1";
 
 type GrammarHighlight = {
   blockId: string;
@@ -46,6 +48,59 @@ function formatDate(iso: string): string {
 
 function isProviderValue(value: unknown): value is Provider {
   return value === "anthropic" || value === "gemini" || value === "openrouter";
+}
+
+function createEmptyProviderModels(): ProviderModelMap {
+  return {
+    anthropic: [],
+    gemini: [],
+    openrouter: []
+  };
+}
+
+function sanitizeProviderModels(value: unknown): ProviderModelMap {
+  const fallback = createEmptyProviderModels();
+  if (!value || typeof value !== "object") {
+    return fallback;
+  }
+
+  const parseList = (raw: unknown): Array<{ id: string; label?: string }> => {
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    const seen = new Set<string>();
+    const result: Array<{ id: string; label?: string }> = [];
+    for (const item of raw) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const maybe = item as { id?: unknown; label?: unknown };
+      if (typeof maybe.id !== "string") {
+        continue;
+      }
+      const id = maybe.id.trim();
+      if (!id || seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      if (typeof maybe.label === "string" && maybe.label.trim()) {
+        result.push({ id, label: maybe.label.trim() });
+      } else {
+        result.push({ id });
+      }
+      if (result.length >= 1200) {
+        break;
+      }
+    }
+    return result;
+  };
+
+  const parsed = value as Partial<Record<Provider, unknown>>;
+  return {
+    anthropic: parseList(parsed.anthropic),
+    gemini: parseList(parsed.gemini),
+    openrouter: parseList(parsed.openrouter)
+  };
 }
 
 function isInsideExistingGrammarHighlight(node: Node): boolean {
@@ -279,18 +334,15 @@ function applyGrammarHighlights(container: HTMLElement, highlights: GrammarHighl
 }
 
 function App() {
-  const uiRevision = "model-picker-v9";
+  const uiRevision = "menu-split-v13";
   const [sessionId, setSessionId] = useState<string>("");
   const [state, setState] = useState<SessionState | null>(null);
   const [instructionText, setInstructionText] = useState("");
   const [editMode, setEditMode] = useState<EditMode>("custom");
+  const [topMenu, setTopMenu] = useState<TopMenu>("editor");
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [model, setModel] = useState("");
-  const [providerModels, setProviderModels] = useState<ProviderModelMap>({
-    anthropic: [],
-    gemini: [],
-    openrouter: []
-  });
+  const [providerModels, setProviderModels] = useState<ProviderModelMap>(createEmptyProviderModels());
   const [showApiKeyMenu, setShowApiKeyMenu] = useState(false);
   const [apiKeys, setApiKeys] = useState<ProviderKeyMap>({
     anthropic: "",
@@ -314,6 +366,12 @@ function App() {
 
   useEffect(() => {
     try {
+      const rawCatalog = window.localStorage.getItem(MODEL_CATALOG_STORAGE_KEY);
+      if (rawCatalog) {
+        const parsedCatalog = JSON.parse(rawCatalog) as unknown;
+        setProviderModels(sanitizeProviderModels(parsedCatalog));
+      }
+
       const rememberRaw = window.localStorage.getItem(REMEMBER_SETTINGS_KEY);
       const shouldRemember = rememberRaw === "1";
       setRememberPreferences(shouldRemember);
@@ -370,6 +428,17 @@ function App() {
       // Ignore browser storage failures.
     }
   }, [preferencesLoaded, rememberPreferences, provider, model, apiKeys]);
+
+  useEffect(() => {
+    if (!preferencesLoaded) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(MODEL_CATALOG_STORAGE_KEY, JSON.stringify(providerModels));
+    } catch {
+      // Ignore browser storage failures.
+    }
+  }, [preferencesLoaded, providerModels]);
 
   useEffect(() => {
     async function init() {
@@ -534,6 +603,7 @@ function App() {
     try {
       window.localStorage.removeItem(PREFERENCES_STORAGE_KEY);
       window.localStorage.removeItem(REMEMBER_SETTINGS_KEY);
+      window.localStorage.removeItem(MODEL_CATALOG_STORAGE_KEY);
     } catch {
       // Ignore browser storage failures.
     }
@@ -541,12 +611,13 @@ function App() {
     setRememberPreferences(false);
     setProvider("anthropic");
     setModel("");
+    setProviderModels(createEmptyProviderModels());
     setApiKeys({
       anthropic: "",
       gemini: "",
       openrouter: ""
     });
-    setStatus("Cleared saved provider, model override, and API keys for this browser.");
+    setStatus("Cleared saved provider, model override, API keys, and model lists for this browser.");
   }
 
   async function onDecide(editId: string, decision: "accept" | "reject"): Promise<void> {
@@ -768,7 +839,7 @@ function App() {
 
     async function renderDocPreview() {
       const container = previewContainerRef.current;
-      if (!sessionId || !state?.workingBlocks.length || !container) {
+      if (topMenu !== "editor" || !sessionId || !state?.workingBlocks.length || !container) {
         if (container) {
           container.innerHTML = "";
         }
@@ -806,7 +877,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [sessionId, state, grammarHighlights]);
+  }, [topMenu, sessionId, state, grammarHighlights]);
 
   return (
     <div className="app">
@@ -819,233 +890,278 @@ function App() {
         </div>
       </header>
 
-      <section className="controls">
-        <label className="file-control">
-          Source `.docx`
-          <input type="file" accept=".docx" onChange={onSourceFileChange} disabled={loading} />
-        </label>
-
-        <label className="file-control">
-          Context Files (`.docx`, `.txt`, `.md`)
-          <input
-            type="file"
-            accept=".docx,.txt,.md"
-            multiple
-            onChange={onContextFileChange}
-            disabled={loading}
-          />
-        </label>
-
-        <div className="provider-row">
-          <label>
-            Provider
-            <select
-              value={provider}
-              onChange={(event) => {
-                setProvider(event.target.value as Provider);
-                setModel("");
-              }}
-              disabled={loading || loadingModels}
-            >
-              <option value="anthropic">Anthropic (Claude)</option>
-              <option value="gemini">Gemini</option>
-              <option value="openrouter">OpenRouter</option>
-            </select>
-          </label>
-          <div className="model-picker-block">
-            <span className="mode-label">Model Picker</span>
-            <div className="model-picker-layout">
-              <label className="model-available-column">
-                Available models (left)
-                <select
-                  className="model-available-select"
-                  size={8}
-                  value={selectedKnownModelId}
-                  onChange={(event) => setModel(event.target.value)}
-                  disabled={loading || loadingModels || providerModels[provider].length === 0}
-                >
-                  <option value="" disabled>
-                    {providerModels[provider].length === 0
-                      ? "Load models first"
-                      : "Type on the right to filter, or click a model"}
-                  </option>
-                  {filteredProviderModels.length === 0 &&
-                    providerModels[provider].length > 0 && (
-                      <option value="__no_match__" disabled>
-                        No models match the text on the right
-                      </option>
-                    )}
-                  {filteredProviderModels.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.label ? `${item.label} (${item.id})` : item.id}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="model-typed-column">
-                Model override (right)
-                <input
-                  type="text"
-                  className="model-search-input"
-                  value={model}
-                  onChange={(event) => setModel(event.target.value)}
-                  placeholder="Type model id here (or click one on the left)"
-                  autoComplete="off"
-                  spellCheck={false}
-                  disabled={loading || loadingModels}
-                />
-                <p className="subtle model-override-readout">
-                  Current override: {model.trim() || "Use provider default"}
-                </p>
-              </label>
-            </div>
-          </div>
-          <p className="subtle">
-            Showing {filteredProviderModels.length} of {providerModels[provider].length} models
-          </p>
-        </div>
-
-        <div className="api-key-menu">
+      <section className="top-menu">
+        <div className="top-menu-buttons">
           <button
             type="button"
-            className={`api-key-toggle ${showApiKeyMenu ? "api-key-toggle-active" : ""}`}
-            onClick={() => setShowApiKeyMenu((prev) => !prev)}
+            className={`top-menu-button ${topMenu === "editor" ? "top-menu-button-active" : ""}`}
+            onClick={() => setTopMenu("editor")}
             disabled={loading || loadingModels}
           >
-            {showApiKeyMenu ? "Hide API Key Menu" : "API Key Menu"}
-          </button>
-          <p className="subtle">
-            Active provider key: {apiKeys[provider].trim() ? "Configured" : "Missing"}
-          </p>
-          <label className="remember-toggle">
-            <input
-              type="checkbox"
-              checked={rememberPreferences}
-              onChange={(event) => setRememberPreferences(event.target.checked)}
-              disabled={loading || loadingModels}
-            />
-            Remember keys + model on this device
-          </label>
-          <button type="button" className="api-key-load-btn" onClick={onLoadModels} disabled={loading || loadingModels}>
-            {loadingModels ? "Loading Models..." : `Load Models For ${provider}`}
+            Editor
           </button>
           <button
             type="button"
-            className="api-key-clear-btn"
-            onClick={onClearSavedPreferences}
+            className={`top-menu-button ${topMenu === "settings" ? "top-menu-button-active" : ""}`}
+            onClick={() => setTopMenu("settings")}
             disabled={loading || loadingModels}
           >
-            Clear Saved Keys + Model
-          </button>
-          {showApiKeyMenu && (
-            <div className="api-key-panel">
-              <label>
-                Anthropic API Key
-                <input
-                  type="password"
-                  value={apiKeys.anthropic}
-                  onChange={(event) =>
-                    setApiKeys((prev) => ({
-                      ...prev,
-                      anthropic: event.target.value
-                    }))
-                  }
-                  placeholder="sk-ant-..."
-                  autoComplete="off"
-                  disabled={loading || loadingModels}
-                />
-              </label>
-              <label>
-                Gemini API Key
-                <input
-                  type="password"
-                  value={apiKeys.gemini}
-                  onChange={(event) =>
-                    setApiKeys((prev) => ({
-                      ...prev,
-                      gemini: event.target.value
-                    }))
-                  }
-                  placeholder="AIza..."
-                  autoComplete="off"
-                  disabled={loading || loadingModels}
-                />
-              </label>
-              <label>
-                OpenRouter API Key
-                <input
-                  type="password"
-                  value={apiKeys.openrouter}
-                  onChange={(event) =>
-                    setApiKeys((prev) => ({
-                      ...prev,
-                      openrouter: event.target.value
-                    }))
-                  }
-                  placeholder="sk-or-v1-..."
-                  autoComplete="off"
-                  disabled={loading || loadingModels}
-                />
-              </label>
-              <p className="subtle">
-                {rememberPreferences
-                  ? "Keys, selected provider, and model override are saved in this browser."
-                  : "Remember is off. Keys and model override are not saved after exit/reload."}
-              </p>
-            </div>
-          )}
-        </div>
-
-        <div className="mode-row">
-          <span className="mode-label">Mode</span>
-          <button
-            type="button"
-            className={`mode-button ${editMode === "custom" ? "mode-button-active" : ""}`}
-            onClick={() => setEditMode("custom")}
-            disabled={loading}
-          >
-            Targeted Edit
-          </button>
-          <button
-            type="button"
-            className={`mode-button ${editMode === "grammar" ? "mode-button-active" : ""}`}
-            onClick={() => setEditMode("grammar")}
-            disabled={loading}
-          >
-            Grammar & Punctuation
+            AI Settings
           </button>
         </div>
-
-        <label className="prompt-field">
-          {editMode === "custom"
-            ? "Edit instruction"
-            : "Custom instructions for grammar mode (optional)"}
-          <textarea
-            value={instructionText}
-            onChange={(event) => setInstructionText(event.target.value)}
-            placeholder={
-              editMode === "custom"
-                ? "Example: tighten wording and fix punctuation for executive tone."
-                : "Optional: focus on commas, tense consistency, and business formal grammar."
-            }
-            rows={4}
-            disabled={loading}
-          />
-        </label>
-        <button
-          type="button"
-          onClick={onRunModeAction}
-          disabled={
-            loading ||
-            !state?.workingBlocks.length ||
-            (editMode === "custom" && !instructionText.trim())
-          }
-        >
-          {editMode === "custom" ? "Propose Edits" : "Analyze Grammar & Punctuation"}
-        </button>
-        {error && <p className="error">{error}</p>}
+        <p className="subtle">
+          Mode: {editMode === "grammar" ? "Grammar & Punctuation" : "Targeted Edit"} | Provider:{" "}
+          {provider} | Model: {model.trim() || "Default"}
+        </p>
       </section>
 
+      {topMenu === "editor" ? (
+        <section className="controls">
+          <label className="file-control">
+            Source `.docx`
+            <input type="file" accept=".docx" onChange={onSourceFileChange} disabled={loading} />
+          </label>
+
+          <label className="file-control">
+            Context Files (`.docx`, `.txt`, `.md`)
+            <input
+              type="file"
+              accept=".docx,.txt,.md"
+              multiple
+              onChange={onContextFileChange}
+              disabled={loading}
+            />
+          </label>
+
+          <div className="editor-mode-summary">
+            <p className="subtle">
+              Editing with{" "}
+              {editMode === "grammar" ? "Grammar & Punctuation mode" : "Targeted Edit mode"}.
+            </p>
+            <button
+              type="button"
+              className="settings-jump-btn"
+              onClick={() => setTopMenu("settings")}
+              disabled={loading || loadingModels}
+            >
+              Open AI Settings
+            </button>
+          </div>
+
+          <label className="prompt-field">
+            {editMode === "custom"
+              ? "Edit instruction"
+              : "Custom instructions for grammar mode (optional)"}
+            <textarea
+              value={instructionText}
+              onChange={(event) => setInstructionText(event.target.value)}
+              placeholder={
+                editMode === "custom"
+                  ? "Example: tighten wording and fix punctuation for executive tone."
+                  : "Optional: focus on commas, tense consistency, and business formal grammar."
+              }
+              rows={4}
+              disabled={loading}
+            />
+          </label>
+          <button
+            type="button"
+            onClick={onRunModeAction}
+            disabled={
+              loading ||
+              !state?.workingBlocks.length ||
+              (editMode === "custom" && !instructionText.trim())
+            }
+          >
+            {editMode === "custom" ? "Propose Edits" : "Analyze Grammar & Punctuation"}
+          </button>
+        </section>
+      ) : (
+        <section className="controls settings-controls">
+          <div className="mode-row">
+            <span className="mode-label">Mode</span>
+            <button
+              type="button"
+              className={`mode-button ${editMode === "custom" ? "mode-button-active" : ""}`}
+              onClick={() => setEditMode("custom")}
+              disabled={loading}
+            >
+              Targeted Edit
+            </button>
+            <button
+              type="button"
+              className={`mode-button ${editMode === "grammar" ? "mode-button-active" : ""}`}
+              onClick={() => setEditMode("grammar")}
+              disabled={loading}
+            >
+              Grammar & Punctuation
+            </button>
+          </div>
+
+          <div className="provider-row">
+            <label>
+              Provider
+              <select
+                value={provider}
+                onChange={(event) => {
+                  setProvider(event.target.value as Provider);
+                  setModel("");
+                }}
+                disabled={loading || loadingModels}
+              >
+                <option value="anthropic">Anthropic (Claude)</option>
+                <option value="gemini">Gemini</option>
+                <option value="openrouter">OpenRouter</option>
+              </select>
+            </label>
+            <div className="model-picker-block">
+              <span className="mode-label">Model Picker</span>
+              <div className="model-picker-layout">
+                <label className="model-available-column">
+                  Available models (left)
+                  <select
+                    className="model-available-select"
+                    size={8}
+                    value={selectedKnownModelId}
+                    onChange={(event) => setModel(event.target.value)}
+                    disabled={loading || loadingModels || providerModels[provider].length === 0}
+                  >
+                    <option value="" disabled>
+                      {providerModels[provider].length === 0
+                        ? "Load models first"
+                        : "Type on the right to filter, or click a model"}
+                    </option>
+                    {filteredProviderModels.length === 0 &&
+                      providerModels[provider].length > 0 && (
+                        <option value="__no_match__" disabled>
+                          No models match the text on the right
+                        </option>
+                      )}
+                    {filteredProviderModels.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.label ? `${item.label} (${item.id})` : item.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="model-typed-column">
+                  Model override (right)
+                  <input
+                    type="text"
+                    className="model-search-input"
+                    value={model}
+                    onChange={(event) => setModel(event.target.value)}
+                    placeholder="Type model id here (or click one on the left)"
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={loading || loadingModels}
+                  />
+                  <p className="subtle model-override-readout">
+                    Current override: {model.trim() || "Use provider default"}
+                  </p>
+                </label>
+              </div>
+            </div>
+            <p className="subtle">
+              Showing {filteredProviderModels.length} of {providerModels[provider].length} models
+            </p>
+          </div>
+
+          <div className="api-key-menu">
+            <button
+              type="button"
+              className={`api-key-toggle ${showApiKeyMenu ? "api-key-toggle-active" : ""}`}
+              onClick={() => setShowApiKeyMenu((prev) => !prev)}
+              disabled={loading || loadingModels}
+            >
+              {showApiKeyMenu ? "Hide API Key Menu" : "API Key Menu"}
+            </button>
+            <p className="subtle">
+              Active provider key: {apiKeys[provider].trim() ? "Configured" : "Missing"}
+            </p>
+            <label className="remember-toggle">
+              <input
+                type="checkbox"
+                checked={rememberPreferences}
+                onChange={(event) => setRememberPreferences(event.target.checked)}
+                disabled={loading || loadingModels}
+              />
+              Remember keys + model on this device
+            </label>
+            <button type="button" className="api-key-load-btn" onClick={onLoadModels} disabled={loading || loadingModels}>
+              {loadingModels ? "Loading Models..." : `Load Models For ${provider}`}
+            </button>
+            <button
+              type="button"
+              className="api-key-clear-btn"
+              onClick={onClearSavedPreferences}
+              disabled={loading || loadingModels}
+            >
+              Clear Saved Keys + Model
+            </button>
+            {showApiKeyMenu && (
+              <div className="api-key-panel">
+                <label>
+                  Anthropic API Key
+                  <input
+                    type="password"
+                    value={apiKeys.anthropic}
+                    onChange={(event) =>
+                      setApiKeys((prev) => ({
+                        ...prev,
+                        anthropic: event.target.value
+                      }))
+                    }
+                    placeholder="sk-ant-..."
+                    autoComplete="off"
+                    disabled={loading || loadingModels}
+                  />
+                </label>
+                <label>
+                  Gemini API Key
+                  <input
+                    type="password"
+                    value={apiKeys.gemini}
+                    onChange={(event) =>
+                      setApiKeys((prev) => ({
+                        ...prev,
+                        gemini: event.target.value
+                      }))
+                    }
+                    placeholder="AIza..."
+                    autoComplete="off"
+                    disabled={loading || loadingModels}
+                  />
+                </label>
+                <label>
+                  OpenRouter API Key
+                  <input
+                    type="password"
+                    value={apiKeys.openrouter}
+                    onChange={(event) =>
+                      setApiKeys((prev) => ({
+                        ...prev,
+                        openrouter: event.target.value
+                      }))
+                    }
+                    placeholder="sk-or-v1-..."
+                    autoComplete="off"
+                    disabled={loading || loadingModels}
+                  />
+                </label>
+                <p className="subtle">
+                  {rememberPreferences
+                    ? "Keys, selected provider, and model override are saved in this browser."
+                    : "Remember is off. Keys and model override are not saved after exit/reload."}
+                </p>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+      {error && <p className="error">{error}</p>}
+
+      {topMenu === "editor" && (
       <main className="workspace">
         <section className="panel">
           <div className="panel-title-row">
@@ -1057,7 +1173,7 @@ function App() {
                 onClick={onSaveWorkspaceForReturn}
                 disabled={loading || !state?.workingBlocks.length}
               >
-                Save Working For Next Return
+                Save Working for Next Return
               </button>
               <button
                 type="button"
@@ -1065,7 +1181,7 @@ function App() {
                 onClick={onRemoveSavedWorkspaceForReturn}
                 disabled={loading}
               >
-                Remove Saved For Next Return
+                Remove Saved Workspace for Next Return
               </button>
               {sessionId && state?.workingBlocks.length ? (
                 <a
@@ -1074,7 +1190,7 @@ function App() {
                   target="_blank"
                   rel="noreferrer"
                 >
-                  donwload finished docx
+                  Download Finished DOCX
                 </a>
               ) : null}
               <button
@@ -1186,6 +1302,7 @@ function App() {
           </div>
         </section>
       </main>
+      )}
     </div>
   );
 }

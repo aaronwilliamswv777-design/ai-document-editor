@@ -58,6 +58,33 @@ body {
   font-size: 0.9rem;
 }
 
+.top-menu {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff6ea;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.top-menu-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.top-menu-button {
+  background: #6f7778;
+  border-color: #5a6263;
+}
+
+.top-menu-button-active {
+  background: var(--accent);
+  border-color: var(--accent-strong);
+}
+
 .controls {
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -84,6 +111,27 @@ body {
   flex-direction: column;
   gap: 6px;
   font-weight: 600;
+}
+
+.settings-controls {
+  gap: 12px;
+}
+
+.editor-mode-summary {
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: #fffdf7;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-jump-btn {
+  background: #4f5c5d;
+  border-color: #3f4a4b;
 }
 
 .provider-row {
@@ -521,6 +569,11 @@ button:disabled {
 }
 
 @media (max-width: 960px) {
+  .top-menu {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
   .workspace {
     grid-template-columns: 1fr;
   }
