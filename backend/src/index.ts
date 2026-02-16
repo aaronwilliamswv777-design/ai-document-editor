@@ -13,7 +13,7 @@ import {
   extractTextFromGenericContext,
   parseDocxToBlocks
 } from "./services/documentService.js";
-import { generateEdits } from "./services/aiService.js";
+import { generateEdits, listProviderModels } from "./services/aiService.js";
 import { ProposalBatch } from "./types.js";
 
 const app = express();
@@ -46,6 +46,11 @@ const decisionSchema = z.object({
 
 const promoteSchema = z.object({
   confirm: z.literal(true)
+});
+
+const listModelsSchema = z.object({
+  provider: z.enum(["anthropic", "gemini", "openrouter"]),
+  apiKey: z.string().min(10).optional()
 });
 
 function cloneBlocks<T extends { id: string; text: string }>(blocks: T[]): T[] {
@@ -291,6 +296,27 @@ async function acceptPendingEditsForSession(session: NonNullable<ReturnType<type
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, now: new Date().toISOString() });
+});
+
+app.post("/api/models", async (req, res) => {
+  try {
+    const payload = listModelsSchema.parse(req.body);
+    const result = await listProviderModels({
+      provider: payload.provider,
+      apiKey: payload.apiKey
+    });
+    return res.json(result);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: "Invalid request body.",
+        issues: error.issues
+      });
+    }
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to fetch model list."
+    });
+  }
 });
 
 app.post("/api/session", (_req, res) => {

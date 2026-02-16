@@ -3,7 +3,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { z } from "zod";
 import { DocumentBlock, ProposedEditOperation } from "../types.js";
 
-type Provider = "anthropic" | "gemini" | "openrouter";
+export type Provider = "anthropic" | "gemini" | "openrouter";
 
 type GenerateArgs = {
   prompt: string;
@@ -25,6 +25,14 @@ const responseSchema = z.object({
     )
     .max(100)
 });
+
+function resolveDefaultModel(provider: Provider): string {
+  return provider === "anthropic"
+    ? process.env.CLAUDE_MODEL || "claude-3-5-sonnet-latest"
+    : provider === "gemini"
+      ? process.env.GEMINI_MODEL || "gemini-1.5-pro"
+      : process.env.OPENROUTER_MODEL || "openai/gpt-5.2";
+}
 
 function buildSystemInstruction(args: GenerateArgs): string {
   const blockLines = args.blocks
@@ -114,6 +122,124 @@ function resolveApiKey(provider: Provider, providedApiKey?: string): string {
   throw new Error(`Missing API key for provider "${provider}".`);
 }
 
+type ListedModel = {
+  id: string;
+  label?: string;
+};
+
+async function listAnthropicModels(apiKey: string): Promise<ListedModel[]> {
+  const response = await fetch("https://api.anthropic.com/v1/models", {
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01"
+    }
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Anthropic models request failed: ${response.status} ${body}`);
+  }
+
+  const body = (await response.json()) as {
+    data?: Array<{ id?: string; display_name?: string }>;
+  };
+
+  return (body.data || [])
+    .map((model) => ({
+      id: model.id || "",
+      label: model.display_name
+    }))
+    .filter((model) => model.id.length > 0);
+}
+
+async function listGeminiModels(apiKey: string): Promise<ListedModel[]> {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Gemini models request failed: ${response.status} ${body}`);
+  }
+
+  const body = (await response.json()) as {
+    models?: Array<{
+      name?: string;
+      displayName?: string;
+      supportedGenerationMethods?: string[];
+    }>;
+  };
+
+  return (body.models || [])
+    .filter((model) =>
+      (model.supportedGenerationMethods || []).some(
+        (method) => method === "generateContent" || method === "streamGenerateContent"
+      )
+    )
+    .map((model) => ({
+      id: (model.name || "").replace(/^models\//, ""),
+      label: model.displayName
+    }))
+    .filter((model) => model.id.length > 0);
+}
+
+async function listOpenRouterModels(apiKey: string): Promise<ListedModel[]> {
+  const response = await fetch("https://openrouter.ai/api/v1/models", {
+    headers: {
+      Authorization: `Bearer ${apiKey}`
+    }
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`OpenRouter models request failed: ${response.status} ${body}`);
+  }
+
+  const body = (await response.json()) as {
+    data?: Array<{ id?: string; name?: string }>;
+  };
+
+  return (body.data || [])
+    .map((model) => ({
+      id: model.id || "",
+      label: model.name
+    }))
+    .filter((model) => model.id.length > 0);
+}
+
+export async function listProviderModels(args: {
+  provider: Provider;
+  apiKey?: string;
+}): Promise<{
+  provider: Provider;
+  models: ListedModel[];
+  defaultModel: string;
+}> {
+  const provider = args.provider;
+  const apiKey = resolveApiKey(provider, args.apiKey);
+
+  const rawModels =
+    provider === "anthropic"
+      ? await listAnthropicModels(apiKey)
+      : provider === "gemini"
+        ? await listGeminiModels(apiKey)
+        : await listOpenRouterModels(apiKey);
+
+  const deduped = new Map<string, ListedModel>();
+  for (const model of rawModels) {
+    if (!deduped.has(model.id)) {
+      deduped.set(model.id, model);
+    }
+  }
+
+  const models = Array.from(deduped.values()).sort((left, right) => left.id.localeCompare(right.id));
+  return {
+    provider,
+    models,
+    defaultModel: resolveDefaultModel(provider)
+  };
+}
+
 async function runAnthropic(prompt: string, model: string, apiKey: string): Promise<string> {
   const client = new Anthropic({ apiKey });
   const response = await client.messages.create({
@@ -183,13 +309,7 @@ export async function generateEdits(args: GenerateArgs): Promise<{
   model: string;
 }> {
   const provider = args.provider;
-  const model =
-    args.model ||
-    (provider === "anthropic"
-      ? process.env.CLAUDE_MODEL || "claude-3-5-sonnet-latest"
-      : provider === "gemini"
-        ? process.env.GEMINI_MODEL || "gemini-1.5-pro"
-        : process.env.OPENROUTER_MODEL || "openai/gpt-5.2");
+  const model = args.model || resolveDefaultModel(provider);
   const apiKey = resolveApiKey(provider, args.apiKey);
 
   const fullPrompt = buildSystemInstruction(args);
@@ -212,4 +332,3 @@ export async function generateEdits(args: GenerateArgs): Promise<{
     model
   };
 }
-

@@ -5,8 +5,10 @@ import {
   analyzeGrammar,
   createSession,
   decideEdit,
+  fetchProviderModels,
   fetchPreviewDoc,
   fetchState,
+  Provider,
   promoteWorking,
   proposeEdits,
   uploadContext,
@@ -15,9 +17,9 @@ import {
 } from "./api";
 import { ProposalBatch, SessionState } from "./types";
 
-type Provider = "anthropic" | "gemini" | "openrouter";
 type EditMode = "custom" | "grammar";
 type ProviderKeyMap = Record<Provider, string>;
+type ProviderModelMap = Record<Provider, Array<{ id: string; label?: string }>>;
 
 type GrammarHighlight = {
   blockId: string;
@@ -268,6 +270,11 @@ function App() {
   const [editMode, setEditMode] = useState<EditMode>("custom");
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [model, setModel] = useState("");
+  const [providerModels, setProviderModels] = useState<ProviderModelMap>({
+    anthropic: [],
+    gemini: [],
+    openrouter: []
+  });
   const [showApiKeyMenu, setShowApiKeyMenu] = useState(false);
   const [apiKeys, setApiKeys] = useState<ProviderKeyMap>({
     anthropic: "",
@@ -275,6 +282,7 @@ function App() {
     openrouter: ""
   });
   const [loading, setLoading] = useState(false);
+  const [loadingModels, setLoadingModels] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("Creating session...");
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -393,6 +401,46 @@ function App() {
       setError(runError instanceof Error ? runError.message : "Failed to run analysis.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function onLoadModels(): Promise<void> {
+    const selectedApiKey = apiKeys[provider].trim();
+    if (!selectedApiKey) {
+      setError(`Add a ${provider} API key first, then load models.`);
+      return;
+    }
+
+    try {
+      setLoadingModels(true);
+      setError("");
+      const result = await fetchProviderModels({
+        provider,
+        apiKey: selectedApiKey
+      });
+
+      setProviderModels((prev) => ({
+        ...prev,
+        [provider]: result.models
+      }));
+
+      if (result.models.length === 0) {
+        setModel("");
+        setStatus(`No models returned for ${provider}.`);
+        return;
+      }
+
+      const hasCurrent = result.models.some((item) => item.id === model);
+      if (!hasCurrent) {
+        const defaultExists = result.models.some((item) => item.id === result.defaultModel);
+        setModel(defaultExists ? result.defaultModel : result.models[0].id);
+      }
+
+      setStatus(`Loaded ${result.models.length} models for ${provider}.`);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Failed to load models.");
+    } finally {
+      setLoadingModels(false);
     }
   }
 
@@ -609,8 +657,11 @@ function App() {
             Provider
             <select
               value={provider}
-              onChange={(event) => setProvider(event.target.value as Provider)}
-              disabled={loading}
+              onChange={(event) => {
+                setProvider(event.target.value as Provider);
+                setModel("");
+              }}
+              disabled={loading || loadingModels}
             >
               <option value="anthropic">Anthropic (Claude)</option>
               <option value="gemini">Gemini</option>
@@ -618,14 +669,23 @@ function App() {
             </select>
           </label>
           <label>
-            Model override (optional)
-            <input
+            Model
+            <select
               value={model}
               onChange={(event) => setModel(event.target.value)}
-              placeholder="Leave blank for default"
-              disabled={loading}
-            />
+              disabled={loading || loadingModels}
+            >
+              <option value="">Use provider default</option>
+              {providerModels[provider].map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label ? `${item.label} (${item.id})` : item.id}
+                </option>
+              ))}
+            </select>
           </label>
+          <p className="subtle">
+            Available models: {providerModels[provider].length}
+          </p>
           {sessionId && (
             <a
               className="download-link"
@@ -646,13 +706,16 @@ function App() {
             type="button"
             className={`api-key-toggle ${showApiKeyMenu ? "api-key-toggle-active" : ""}`}
             onClick={() => setShowApiKeyMenu((prev) => !prev)}
-            disabled={loading}
+            disabled={loading || loadingModels}
           >
             {showApiKeyMenu ? "Hide API Key Menu" : "API Key Menu"}
           </button>
           <p className="subtle">
             Active provider key: {apiKeys[provider].trim() ? "Configured" : "Missing"}
           </p>
+          <button type="button" className="api-key-load-btn" onClick={onLoadModels} disabled={loading || loadingModels}>
+            {loadingModels ? "Loading Models..." : `Load Models For ${provider}`}
+          </button>
           {showApiKeyMenu && (
             <div className="api-key-panel">
               <label>
@@ -668,7 +731,7 @@ function App() {
                   }
                   placeholder="sk-ant-..."
                   autoComplete="off"
-                  disabled={loading}
+                  disabled={loading || loadingModels}
                 />
               </label>
               <label>
@@ -684,7 +747,7 @@ function App() {
                   }
                   placeholder="AIza..."
                   autoComplete="off"
-                  disabled={loading}
+                  disabled={loading || loadingModels}
                 />
               </label>
               <label>
@@ -700,7 +763,7 @@ function App() {
                   }
                   placeholder="sk-or-v1-..."
                   autoComplete="off"
-                  disabled={loading}
+                  disabled={loading || loadingModels}
                 />
               </label>
               <p className="subtle">Keys are used only for this browser session.</p>

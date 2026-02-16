@@ -2,6 +2,8 @@ import { ProposalBatch, SessionState } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
 
+export type Provider = "anthropic" | "gemini" | "openrouter";
+
 async function parseJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let detail = `Request failed (${response.status})`;
@@ -61,7 +63,7 @@ export async function proposeEdits(
   sessionId: string,
   payload: {
     prompt: string;
-    provider: "anthropic" | "gemini" | "openrouter";
+    provider: Provider;
     model?: string;
     apiKey?: string;
   }
@@ -80,12 +82,30 @@ export async function analyzeGrammar(
   sessionId: string,
   payload: {
     customInstructions?: string;
-    provider: "anthropic" | "gemini" | "openrouter";
+    provider: Provider;
     model?: string;
     apiKey?: string;
   }
 ): Promise<ProposalBatch> {
   const response = await fetch(`${API_BASE}/api/session/${sessionId}/analyze-grammar`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  return parseJson(response);
+}
+
+export async function fetchProviderModels(payload: {
+  provider: Provider;
+  apiKey?: string;
+}): Promise<{
+  provider: Provider;
+  defaultModel: string;
+  models: Array<{ id: string; label?: string }>;
+}> {
+  const response = await fetch(`${API_BASE}/api/models`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"

@@ -131,6 +131,12 @@ label input,
   border-color: var(--accent-strong);
 }
 
+.api-key-load-btn {
+  justify-self: start;
+  background: #566a36;
+  border-color: #495c2d;
+}
+
 .api-key-panel {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
