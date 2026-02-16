@@ -7,6 +7,7 @@ Dockerized web app for human-in-the-loop AI editing of Word documents (`.docx`):
 - Prompt AI for targeted edits.
 - Switch to Grammar & Punctuation mode and run document analysis.
 - Optional custom instructions in Grammar & Punctuation mode.
+- Add provider API keys in a dedicated API Key menu in the UI.
 - Review clear highlighted diffs per proposed edit.
 - See grammar/punctuation detections highlighted in red in the formatted preview with hover explanations.
 - Accept or reject each proposal individually.
@@ -26,7 +27,6 @@ Dockerized web app for human-in-the-loop AI editing of Word documents (`.docx`):
   - Anthropic (Claude)
   - Gemini
   - OpenRouter
-  - Mock fallback (no API key needed)
 
 ## Project Structure
 

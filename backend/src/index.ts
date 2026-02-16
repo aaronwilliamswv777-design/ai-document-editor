@@ -28,14 +28,16 @@ app.use(express.json({ limit: "1mb" }));
 
 const proposeSchema = z.object({
   prompt: z.string().min(3),
-  provider: z.enum(["anthropic", "gemini", "openrouter", "mock"]).optional(),
-  model: z.string().optional()
+  provider: z.enum(["anthropic", "gemini", "openrouter"]).optional(),
+  model: z.string().optional(),
+  apiKey: z.string().min(10).optional()
 });
 
 const grammarAnalyzeSchema = z.object({
   customInstructions: z.string().max(4000).optional(),
-  provider: z.enum(["anthropic", "gemini", "openrouter", "mock"]).optional(),
-  model: z.string().optional()
+  provider: z.enum(["anthropic", "gemini", "openrouter"]).optional(),
+  model: z.string().optional(),
+  apiKey: z.string().min(10).optional()
 });
 
 const decisionSchema = z.object({
@@ -442,8 +444,9 @@ app.post("/api/session/:id/propose-edits", async (req, res) => {
       prompt: payload.prompt,
       contextText,
       blocks: session.workingBlocks,
-      provider: payload.provider || "mock",
-      model: payload.model
+      provider: payload.provider || "anthropic",
+      model: payload.model,
+      apiKey: payload.apiKey
     });
 
     const blockMap = new Map(session.workingBlocks.map((block) => [block.id, block]));
@@ -508,8 +511,9 @@ app.post("/api/session/:id/analyze-grammar", async (req, res) => {
       prompt: grammarPrompt,
       contextText,
       blocks: session.workingBlocks,
-      provider: payload.provider || "mock",
-      model: payload.model
+      provider: payload.provider || "anthropic",
+      model: payload.model,
+      apiKey: payload.apiKey
     });
 
     const blockMap = new Map(session.workingBlocks.map((block) => [block.id, block]));

@@ -59,7 +59,12 @@ export async function uploadContext(sessionId: string, file: File): Promise<void
 
 export async function proposeEdits(
   sessionId: string,
-  payload: { prompt: string; provider: "anthropic" | "gemini" | "openrouter" | "mock"; model?: string }
+  payload: {
+    prompt: string;
+    provider: "anthropic" | "gemini" | "openrouter";
+    model?: string;
+    apiKey?: string;
+  }
 ): Promise<ProposalBatch> {
   const response = await fetch(`${API_BASE}/api/session/${sessionId}/propose-edits`, {
     method: "POST",
@@ -75,8 +80,9 @@ export async function analyzeGrammar(
   sessionId: string,
   payload: {
     customInstructions?: string;
-    provider: "anthropic" | "gemini" | "openrouter" | "mock";
+    provider: "anthropic" | "gemini" | "openrouter";
     model?: string;
+    apiKey?: string;
   }
 ): Promise<ProposalBatch> {
   const response = await fetch(`${API_BASE}/api/session/${sessionId}/analyze-grammar`, {

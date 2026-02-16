@@ -111,6 +111,38 @@ label input,
   font-weight: 600;
 }
 
+.api-key-menu {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff8ec;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.api-key-toggle {
+  justify-self: start;
+  background: #4f5c5d;
+  border-color: #3f4a4b;
+}
+
+.api-key-toggle-active {
+  background: var(--accent);
+  border-color: var(--accent-strong);
+}
+
+.api-key-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.api-key-panel label {
+  display: flex;
+  flex-direction: column;
+  font-weight: 600;
+}
+
 .mode-row {
   display: flex;
   flex-wrap: wrap;

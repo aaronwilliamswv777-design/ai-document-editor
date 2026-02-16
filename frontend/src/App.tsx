@@ -15,8 +15,9 @@ import {
 } from "./api";
 import { ProposalBatch, SessionState } from "./types";
 
-type Provider = "anthropic" | "gemini" | "openrouter" | "mock";
+type Provider = "anthropic" | "gemini" | "openrouter";
 type EditMode = "custom" | "grammar";
+type ProviderKeyMap = Record<Provider, string>;
 
 type GrammarHighlight = {
   blockId: string;
@@ -265,8 +266,14 @@ function App() {
   const [state, setState] = useState<SessionState | null>(null);
   const [instructionText, setInstructionText] = useState("");
   const [editMode, setEditMode] = useState<EditMode>("custom");
-  const [provider, setProvider] = useState<Provider>("mock");
+  const [provider, setProvider] = useState<Provider>("anthropic");
   const [model, setModel] = useState("");
+  const [showApiKeyMenu, setShowApiKeyMenu] = useState(false);
+  const [apiKeys, setApiKeys] = useState<ProviderKeyMap>({
+    anthropic: "",
+    gemini: "",
+    openrouter: ""
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("Creating session...");
@@ -351,6 +358,11 @@ function App() {
     if (editMode === "custom" && !instructionText.trim()) {
       return;
     }
+    const selectedApiKey = apiKeys[provider].trim();
+    if (!selectedApiKey) {
+      setError(`Add a ${provider} API key in the API Keys menu before running this mode.`);
+      return;
+    }
 
     try {
       setLoading(true);
@@ -360,6 +372,7 @@ function App() {
         const result = await analyzeGrammar(sessionId, {
           customInstructions: instructionText.trim() || undefined,
           provider,
+          apiKey: selectedApiKey,
           ...(model.trim() ? { model: model.trim() } : {})
         });
         await refresh(sessionId);
@@ -370,6 +383,7 @@ function App() {
         const result = await proposeEdits(sessionId, {
           prompt: instructionText.trim(),
           provider,
+          apiKey: selectedApiKey,
           ...(model.trim() ? { model: model.trim() } : {})
         });
         await refresh(sessionId);
@@ -598,7 +612,6 @@ function App() {
               onChange={(event) => setProvider(event.target.value as Provider)}
               disabled={loading}
             >
-              <option value="mock">Mock (no API key required)</option>
               <option value="anthropic">Anthropic (Claude)</option>
               <option value="gemini">Gemini</option>
               <option value="openrouter">OpenRouter</option>
@@ -626,6 +639,73 @@ function App() {
           <button type="button" onClick={onPromoteWorking} disabled={loading || !state?.workingBlocks.length}>
             Promote Working to Source
           </button>
+        </div>
+
+        <div className="api-key-menu">
+          <button
+            type="button"
+            className={`api-key-toggle ${showApiKeyMenu ? "api-key-toggle-active" : ""}`}
+            onClick={() => setShowApiKeyMenu((prev) => !prev)}
+            disabled={loading}
+          >
+            {showApiKeyMenu ? "Hide API Key Menu" : "API Key Menu"}
+          </button>
+          <p className="subtle">
+            Active provider key: {apiKeys[provider].trim() ? "Configured" : "Missing"}
+          </p>
+          {showApiKeyMenu && (
+            <div className="api-key-panel">
+              <label>
+                Anthropic API Key
+                <input
+                  type="password"
+                  value={apiKeys.anthropic}
+                  onChange={(event) =>
+                    setApiKeys((prev) => ({
+                      ...prev,
+                      anthropic: event.target.value
+                    }))
+                  }
+                  placeholder="sk-ant-..."
+                  autoComplete="off"
+                  disabled={loading}
+                />
+              </label>
+              <label>
+                Gemini API Key
+                <input
+                  type="password"
+                  value={apiKeys.gemini}
+                  onChange={(event) =>
+                    setApiKeys((prev) => ({
+                      ...prev,
+                      gemini: event.target.value
+                    }))
+                  }
+                  placeholder="AIza..."
+                  autoComplete="off"
+                  disabled={loading}
+                />
+              </label>
+              <label>
+                OpenRouter API Key
+                <input
+                  type="password"
+                  value={apiKeys.openrouter}
+                  onChange={(event) =>
+                    setApiKeys((prev) => ({
+                      ...prev,
+                      openrouter: event.target.value
+                    }))
+                  }
+                  placeholder="sk-or-v1-..."
+                  autoComplete="off"
+                  disabled={loading}
+                />
+              </label>
+              <p className="subtle">Keys are used only for this browser session.</p>
+            </div>
+          )}
         </div>
 
         <div className="mode-row">

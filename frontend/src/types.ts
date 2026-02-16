@@ -28,7 +28,7 @@ export type ProposalBatch = {
   mode: "custom" | "grammar";
   prompt: string;
   createdAt: string;
-  provider: "anthropic" | "gemini" | "openrouter" | "mock";
+  provider: "anthropic" | "gemini" | "openrouter";
   model: string;
   edits: EditProposal[];
 };
