@@ -1,4 +1,13 @@
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  CSSProperties,
+  ChangeEvent,
+  DragEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import { renderAsync } from "docx-preview";
 import {
   acceptAllEdits,
@@ -26,6 +35,21 @@ type EditMode = "custom" | "grammar";
 type TopMenu = "editor" | "settings";
 type ProviderKeyMap = Record<Provider, string>;
 type ProviderModelMap = Record<Provider, Array<{ id: string; label?: string }>>;
+type SidebarSectionId =
+  | "workflow"
+  | "documents"
+  | "prompt"
+  | "changes"
+  | "context"
+  | "workspace"
+  | "direct"
+  | "ai"
+  | "appearance";
+type ThemeSettings = {
+  overallColor: string;
+  mainUiColor: string;
+  accentColor: string;
+};
 type PersistedPreferences = {
   provider?: Provider;
   model?: string;
@@ -36,11 +60,33 @@ const REMEMBER_SETTINGS_KEY = "doc-edit.remember-settings.v1";
 const MODEL_CATALOG_STORAGE_KEY = "doc-edit.model-catalog.v1";
 const EDIT_MODE_STORAGE_KEY = "doc-edit.ui.edit-mode.v1";
 const TOP_MENU_STORAGE_KEY = "doc-edit.ui.top-menu.v1";
+const SIDEBAR_ORDER_STORAGE_KEY = "doc-edit.ui.sidebar-order.v1";
+const THEME_STORAGE_KEY = "doc-edit.ui.theme.v1";
+const DEFAULT_THEME: ThemeSettings = {
+  overallColor: "#090c12",
+  mainUiColor: "#171c26",
+  accentColor: "#2b9cff"
+};
+const DEFAULT_SIDEBAR_ORDER: SidebarSectionId[] = [
+  "workflow",
+  "documents",
+  "prompt",
+  "changes",
+  "context",
+  "workspace",
+  "direct",
+  "ai",
+  "appearance"
+];
 
 type GrammarHighlight = {
+  editId: string;
+  mode: "grammar" | "custom";
   blockId: string;
   blockText: string;
   targetText: string;
+  rationale: string;
+  suggestionSentence: string;
   tooltip: string;
   hintIndex: number;
 };
@@ -59,6 +105,77 @@ function isEditModeValue(value: unknown): value is EditMode {
 
 function isTopMenuValue(value: unknown): value is TopMenu {
   return value === "editor" || value === "settings";
+}
+
+function isSidebarSectionValue(value: unknown): value is SidebarSectionId {
+  return (
+    value === "workflow" ||
+    value === "documents" ||
+    value === "prompt" ||
+    value === "changes" ||
+    value === "context" ||
+    value === "workspace" ||
+    value === "direct" ||
+    value === "ai" ||
+    value === "appearance"
+  );
+}
+
+function sanitizeSidebarOrder(value: unknown): SidebarSectionId[] {
+  if (!Array.isArray(value)) {
+    return [...DEFAULT_SIDEBAR_ORDER];
+  }
+  const unique = new Set<SidebarSectionId>();
+  for (const item of value) {
+    if (isSidebarSectionValue(item)) {
+      unique.add(item);
+    }
+  }
+  for (const fallback of DEFAULT_SIDEBAR_ORDER) {
+    if (!unique.has(fallback)) {
+      unique.add(fallback);
+    }
+  }
+  return Array.from(unique);
+}
+
+function isHexColor(value: string): boolean {
+  return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(value);
+}
+
+function normalizeThemeColor(input: unknown, fallback: string): string {
+  if (typeof input !== "string") {
+    return fallback;
+  }
+  const trimmed = input.trim();
+  return isHexColor(trimmed) ? trimmed : fallback;
+}
+
+function sanitizeThemeSettings(value: unknown): ThemeSettings {
+  if (!value || typeof value !== "object") {
+    return { ...DEFAULT_THEME };
+  }
+  const payload = value as Partial<ThemeSettings>;
+  return {
+    overallColor: normalizeThemeColor(payload.overallColor, DEFAULT_THEME.overallColor),
+    mainUiColor: normalizeThemeColor(payload.mainUiColor, DEFAULT_THEME.mainUiColor),
+    accentColor: normalizeThemeColor(payload.accentColor, DEFAULT_THEME.accentColor)
+  };
+}
+
+function hexToRgba(value: string, alpha: number): string {
+  if (!isHexColor(value)) {
+    return `rgba(43, 156, 255, ${alpha})`;
+  }
+  const trimmed = value.replace("#", "");
+  const full =
+    trimmed.length === 3
+      ? `${trimmed[0]}${trimmed[0]}${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}`
+      : trimmed;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 function createEmptyProviderModels(): ProviderModelMap {
@@ -336,8 +453,8 @@ function buildSentenceScopedSuggestion(proposedText: string, targetText: string)
   return sentences[0];
 }
 
-function applyHighlightToParagraph(paragraph: Element, targetText: string, tooltip: string): boolean {
-  const needle = targetText.trim();
+function applyHighlightToParagraph(paragraph: Element, highlight: GrammarHighlight): boolean {
+  const needle = highlight.targetText.trim();
   if (!needle) {
     return false;
   }
@@ -389,8 +506,8 @@ function applyHighlightToParagraph(paragraph: Element, targetText: string, toolt
 
   const marker = document.createElement("span");
   marker.className = "grammar-issue-highlight";
-  marker.setAttribute("data-grammar-tooltip", tooltip);
-  marker.setAttribute("aria-label", tooltip);
+  marker.setAttribute("data-grammar-tooltip", highlight.tooltip);
+  marker.setAttribute("aria-label", highlight.tooltip);
 
   try {
     range.surroundContents(marker);
@@ -399,6 +516,62 @@ function applyHighlightToParagraph(paragraph: Element, targetText: string, toolt
     marker.appendChild(extracted);
     range.insertNode(marker);
   }
+
+  const anchor = document.createElement("span");
+  anchor.className = "grammar-issue-anchor";
+  marker.parentNode?.insertBefore(anchor, marker);
+  anchor.appendChild(marker);
+
+  const popover = document.createElement("span");
+  popover.className = "grammar-inline-popover";
+  popover.setAttribute("aria-hidden", "true");
+
+  const issueType = document.createElement("span");
+  issueType.className = "grammar-inline-popover-type";
+  issueType.textContent = highlight.mode === "grammar" ? "Grammar issue" : "Suggested edit";
+  popover.appendChild(issueType);
+
+  const reasonLabel = document.createElement("span");
+  reasonLabel.className = "grammar-inline-popover-label";
+  reasonLabel.textContent = "Reason";
+  popover.appendChild(reasonLabel);
+
+  const reasonValue = document.createElement("span");
+  reasonValue.className = "grammar-inline-popover-body";
+  reasonValue.textContent = highlight.rationale;
+  popover.appendChild(reasonValue);
+
+  const sentenceLabel = document.createElement("span");
+  sentenceLabel.className = "grammar-inline-popover-label";
+  sentenceLabel.textContent = "Suggested sentence";
+  popover.appendChild(sentenceLabel);
+
+  const sentenceValue = document.createElement("span");
+  sentenceValue.className = "grammar-inline-popover-body";
+  sentenceValue.textContent = highlight.suggestionSentence;
+  popover.appendChild(sentenceValue);
+
+  const actionRow = document.createElement("span");
+  actionRow.className = "grammar-inline-actions";
+
+  const acceptButton = document.createElement("button");
+  acceptButton.type = "button";
+  acceptButton.className = "inline-decision-btn inline-decision-accept";
+  acceptButton.dataset.inlineDecision = "accept";
+  acceptButton.dataset.editId = highlight.editId;
+  acceptButton.textContent = "Accept";
+  actionRow.appendChild(acceptButton);
+
+  const rejectButton = document.createElement("button");
+  rejectButton.type = "button";
+  rejectButton.className = "inline-decision-btn inline-decision-reject";
+  rejectButton.dataset.inlineDecision = "reject";
+  rejectButton.dataset.editId = highlight.editId;
+  rejectButton.textContent = "Reject";
+  actionRow.appendChild(rejectButton);
+
+  popover.appendChild(actionRow);
+  anchor.appendChild(popover);
 
   return true;
 }
@@ -435,17 +608,20 @@ function applyGrammarHighlights(container: HTMLElement, highlights: GrammarHighl
       continue;
     }
 
-    applyHighlightToParagraph(paragraph, highlight.targetText, highlight.tooltip);
+    applyHighlightToParagraph(paragraph, highlight);
   }
 }
 
 function App() {
-  const uiRevision = "menu-split-v17";
+  const uiRevision = "sidebar-modern-v18";
   const [sessionId, setSessionId] = useState<string>("");
   const [state, setState] = useState<SessionState | null>(null);
   const [instructionText, setInstructionText] = useState("");
   const [editMode, setEditMode] = useState<EditMode>("custom");
   const [topMenu, setTopMenu] = useState<TopMenu>("editor");
+  const [sidebarOrder, setSidebarOrder] = useState<SidebarSectionId[]>([...DEFAULT_SIDEBAR_ORDER]);
+  const [draggingSidebarSection, setDraggingSidebarSection] = useState<SidebarSectionId | null>(null);
+  const [themeSettings, setThemeSettings] = useState<ThemeSettings>({ ...DEFAULT_THEME });
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [model, setModel] = useState("");
   const [providerModels, setProviderModels] = useState<ProviderModelMap>(createEmptyProviderModels());
@@ -466,10 +642,10 @@ function App() {
   const [directEditMode, setDirectEditMode] = useState(false);
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
 
-  async function refresh(targetSessionId: string): Promise<void> {
+  const refresh = useCallback(async (targetSessionId: string): Promise<void> => {
     const next = await fetchState(targetSessionId);
     setState(next);
-  }
+  }, []);
 
   useEffect(() => {
     try {
@@ -480,6 +656,18 @@ function App() {
       const savedTopMenu = window.localStorage.getItem(TOP_MENU_STORAGE_KEY);
       if (isTopMenuValue(savedTopMenu)) {
         setTopMenu(savedTopMenu);
+      }
+
+      const rawSidebarOrder = window.localStorage.getItem(SIDEBAR_ORDER_STORAGE_KEY);
+      if (rawSidebarOrder) {
+        const parsedOrder = JSON.parse(rawSidebarOrder) as unknown;
+        setSidebarOrder(sanitizeSidebarOrder(parsedOrder));
+      }
+
+      const rawTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+      if (rawTheme) {
+        const parsedTheme = JSON.parse(rawTheme) as unknown;
+        setThemeSettings(sanitizeThemeSettings(parsedTheme));
       }
 
       const rawCatalog = window.localStorage.getItem(MODEL_CATALOG_STORAGE_KEY);
@@ -525,7 +713,7 @@ function App() {
     } finally {
       setPreferencesLoaded(true);
     }
-  }, []);
+  }, [refresh]);
 
   useEffect(() => {
     if (!preferencesLoaded) {
@@ -552,10 +740,12 @@ function App() {
     try {
       window.localStorage.setItem(EDIT_MODE_STORAGE_KEY, editMode);
       window.localStorage.setItem(TOP_MENU_STORAGE_KEY, topMenu);
+      window.localStorage.setItem(SIDEBAR_ORDER_STORAGE_KEY, JSON.stringify(sidebarOrder));
+      window.localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify(themeSettings));
     } catch {
       // Ignore browser storage failures.
     }
-  }, [preferencesLoaded, editMode, topMenu]);
+  }, [preferencesLoaded, editMode, topMenu, sidebarOrder, themeSettings]);
 
   useEffect(() => {
     if (!preferencesLoaded) {
@@ -650,7 +840,7 @@ function App() {
     }
     const selectedApiKey = apiKeys[provider].trim();
     if (!selectedApiKey) {
-      setError(`Add a ${provider} API key in the API Keys menu before running this mode.`);
+      setError(`Add a ${provider} API key in AI Settings before running this action.`);
       return;
     }
 
@@ -748,22 +938,25 @@ function App() {
     setStatus("Cleared saved provider, model override, API keys, and model lists for this browser.");
   }
 
-  async function onDecide(editId: string, decision: "accept" | "reject"): Promise<void> {
-    if (!sessionId) {
-      return;
-    }
-    try {
-      setLoading(true);
-      setError("");
-      await decideEdit(sessionId, editId, decision);
-      await refresh(sessionId);
-      setStatus(`Edit ${decision}ed.`);
-    } catch (decisionError) {
-      setError(decisionError instanceof Error ? decisionError.message : "Failed to apply decision.");
-    } finally {
-      setLoading(false);
-    }
-  }
+  const onDecide = useCallback(
+    async (editId: string, decision: "accept" | "reject"): Promise<void> => {
+      if (!sessionId) {
+        return;
+      }
+      try {
+        setLoading(true);
+        setError("");
+        await decideEdit(sessionId, editId, decision);
+        await refresh(sessionId);
+        setStatus(`Suggestion ${decision}ed.`);
+      } catch (decisionError) {
+        setError(decisionError instanceof Error ? decisionError.message : "Failed to apply decision.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [sessionId, refresh]
+  );
 
   async function onAcceptAllPending(): Promise<void> {
     if (!sessionId) {
@@ -957,6 +1150,50 @@ function App() {
     }
   }
 
+  function onSidebarSectionDragStart(
+    event: DragEvent<HTMLElement>,
+    sectionId: SidebarSectionId
+  ): void {
+    setDraggingSidebarSection(sectionId);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", sectionId);
+  }
+
+  function onSidebarSectionDragOver(event: DragEvent<HTMLElement>): void {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }
+
+  function onSidebarSectionDrop(event: DragEvent<HTMLElement>, targetId: SidebarSectionId): void {
+    event.preventDefault();
+    const transferred = event.dataTransfer.getData("text/plain");
+    const sourceId = isSidebarSectionValue(transferred) ? transferred : draggingSidebarSection;
+    if (!sourceId || sourceId === targetId) {
+      return;
+    }
+
+    setSidebarOrder((previous) => {
+      const next = [...previous];
+      const sourceIndex = next.indexOf(sourceId);
+      const targetIndex = next.indexOf(targetId);
+      if (sourceIndex < 0 || targetIndex < 0) {
+        return previous;
+      }
+      next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, sourceId);
+      return next;
+    });
+    setDraggingSidebarSection(null);
+  }
+
+  function onSidebarSectionDragEnd(): void {
+    setDraggingSidebarSection(null);
+  }
+
+  function onResetThemeDefaults(): void {
+    setThemeSettings({ ...DEFAULT_THEME });
+  }
+
   const allBatches = useMemo(() => {
     if (!state) {
       return [] as ProposalBatch[];
@@ -988,6 +1225,35 @@ function App() {
     const known = providerModels[provider].some((item) => item.id === model.trim());
     return known ? model.trim() : "";
   }, [providerModels, provider, model]);
+
+  const pendingEdits = useMemo(() => {
+    if (!state) {
+      return [] as Array<{
+        batch: ProposalBatch;
+        edit: ProposalBatch["edits"][number];
+      }>;
+    }
+    return allBatches.flatMap((batch) =>
+      batch.edits
+        .filter((edit) => edit.status === "pending")
+        .map((edit) => ({
+          batch,
+          edit
+        }))
+    );
+  }, [state, allBatches]);
+
+  const appThemeStyle = useMemo(
+    () =>
+      ({
+        "--app-bg": themeSettings.overallColor,
+        "--main-ui": themeSettings.mainUiColor,
+        "--accent": themeSettings.accentColor,
+        "--accent-ghost": hexToRgba(themeSettings.accentColor, 0.16),
+        "--accent-glow": hexToRgba(themeSettings.accentColor, 0.45)
+      }) as CSSProperties,
+    [themeSettings]
+  );
 
   const grammarHighlights = useMemo(() => {
     if (!state) {
@@ -1029,19 +1295,21 @@ function App() {
         }
 
         for (const targetText of targetTexts) {
-          const key = `${edit.blockId}:${targetText.toLowerCase()}`;
+          const key = `${edit.id}:${targetText.toLowerCase()}`;
           if (seen.has(key)) {
             continue;
           }
           seen.add(key);
+          const sentenceScopedSuggestion = buildSentenceScopedSuggestion(edit.proposedText, targetText);
           highlights.push({
+            editId: edit.id,
+            mode: batch.mode,
             blockId: edit.blockId,
             blockText: block.text,
             targetText,
-            tooltip: `Reason\n${edit.rationale}\n\nSuggested change\n${buildSentenceScopedSuggestion(
-              edit.proposedText,
-              targetText
-            )}`,
+            rationale: edit.rationale,
+            suggestionSentence: sentenceScopedSuggestion,
+            tooltip: `Reason\n${edit.rationale}\n\nSuggested change\n${sentenceScopedSuggestion}`,
             hintIndex: blockIndexById.get(edit.blockId) ?? 0
           });
         }
@@ -1099,469 +1367,599 @@ function App() {
     };
   }, [topMenu, sessionId, state, grammarHighlights, directEditMode]);
 
+  useEffect(() => {
+    if (topMenu !== "editor" || !previewContainerRef.current) {
+      return;
+    }
+
+    const container = previewContainerRef.current;
+    const onInlineActionClick = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) {
+        return;
+      }
+      const actionButton = target.closest<HTMLButtonElement>(".inline-decision-btn");
+      if (!actionButton) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+
+      const editId = actionButton.dataset.editId;
+      const decision = actionButton.dataset.inlineDecision;
+      if (!editId || loading || (decision !== "accept" && decision !== "reject")) {
+        return;
+      }
+      void onDecide(editId, decision);
+    };
+
+    container.addEventListener("click", onInlineActionClick);
+    return () => {
+      container.removeEventListener("click", onInlineActionClick);
+    };
+  }, [topMenu, onDecide, loading]);
+
+  const editorSections = new Set<SidebarSectionId>([
+    "workflow",
+    "documents",
+    "prompt",
+    "changes",
+    "context",
+    "workspace",
+    "direct",
+    "appearance"
+  ]);
+  const settingsSections = new Set<SidebarSectionId>(["workflow", "ai", "appearance"]);
+  const visibleSidebarSections = sidebarOrder.filter((id) =>
+    topMenu === "editor" ? editorSections.has(id) : settingsSections.has(id)
+  );
+
   return (
-    <div className="app">
-      <header className="topbar">
-        <h1>Doc Editing Application</h1>
-        <div className="meta">
-          <span>{status}</span>
-          <span>Pending edits: {pendingCount}</span>
-          <span>UI rev: {uiRevision}</span>
-        </div>
-      </header>
+    <div className="app app-shell" style={appThemeStyle}>
+      <aside className="sidebar">
+        <header className="sidebar-header">
+          <h1>Doc Editing Application</h1>
+          <p className="subtle">{status}</p>
+          <p className="subtle">
+            Pending suggestions: {pendingCount} | UI rev: {uiRevision}
+          </p>
+          <p className="subtle">Drag section cards to reorder. Layout saves automatically.</p>
+        </header>
 
-      <section className="top-menu">
-        <div className="top-menu-buttons">
-          <button
-            type="button"
-            className={`top-menu-button ${topMenu === "editor" ? "top-menu-button-active" : ""}`}
-            onClick={() => setTopMenu("editor")}
-            disabled={loading || loadingModels}
+        {error && <p className="error">{error}</p>}
+
+        {visibleSidebarSections.map((sectionId) => (
+          <details
+            key={sectionId}
+            className={`sidebar-section ${draggingSidebarSection === sectionId ? "sidebar-section-dragging" : ""}`}
+            open
+            draggable
+            onDragStart={(event) => onSidebarSectionDragStart(event, sectionId)}
+            onDragOver={onSidebarSectionDragOver}
+            onDrop={(event) => onSidebarSectionDrop(event, sectionId)}
+            onDragEnd={onSidebarSectionDragEnd}
           >
-            Editor
-          </button>
-          <button
-            type="button"
-            className={`top-menu-button ${topMenu === "settings" ? "top-menu-button-active" : ""}`}
-            onClick={() => setTopMenu("settings")}
-            disabled={loading || loadingModels}
-          >
-            AI Settings
-          </button>
-        </div>
-        <p className="subtle">
-          Mode: {editMode === "grammar" ? "Grammar & Punctuation" : "Targeted Edit"} | Provider:{" "}
-          {provider} | Model: {model.trim() || "Default"}
-        </p>
-      </section>
-
-      {topMenu === "editor" ? (
-        <section className="controls">
-          <label className="file-control">
-            Source `.docx`
-            <input type="file" accept=".docx" onChange={onSourceFileChange} disabled={loading} />
-          </label>
-
-          <label className="file-control">
-            Context Files (`.docx`, `.txt`, `.md`)
-            <input
-              type="file"
-              accept=".docx,.txt,.md"
-              multiple
-              onChange={onContextFileChange}
-              disabled={loading}
-            />
-          </label>
-
-          <div className="editor-mode-summary">
-            <p className="subtle">
-              Editing with{" "}
-              {editMode === "grammar" ? "Grammar & Punctuation mode" : "Targeted Edit mode"}.
-            </p>
-            <button
-              type="button"
-              className="settings-jump-btn"
-              onClick={() => setTopMenu("settings")}
-              disabled={loading || loadingModels}
-            >
-              Open AI Settings
-            </button>
-          </div>
-
-          <label className="prompt-field">
-            {editMode === "custom"
-              ? "Edit instruction"
-              : "Custom instructions for grammar mode (optional)"}
-            <textarea
-              value={instructionText}
-              onChange={(event) => setInstructionText(event.target.value)}
-              placeholder={
-                editMode === "custom"
-                  ? "Example: tighten wording and fix punctuation for executive tone."
-                  : "Optional: focus on commas, tense consistency, and business formal grammar."
-              }
-              rows={4}
-              disabled={loading}
-            />
-          </label>
-          <button
-            type="button"
-            onClick={onRunModeAction}
-            disabled={
-              loading ||
-              !state?.workingBlocks.length ||
-              (editMode === "custom" && !instructionText.trim())
-            }
-          >
-            {editMode === "custom" ? "Propose Edits" : "Analyze Grammar & Punctuation"}
-          </button>
-        </section>
-      ) : (
-        <section className="controls settings-controls">
-          <div className="mode-row">
-            <span className="mode-label">Mode</span>
-            <button
-              type="button"
-              className={`mode-button ${editMode === "custom" ? "mode-button-active" : ""}`}
-              onClick={() => setEditMode("custom")}
-              disabled={loading}
-            >
-              Targeted Edit
-            </button>
-            <button
-              type="button"
-              className={`mode-button ${editMode === "grammar" ? "mode-button-active" : ""}`}
-              onClick={() => setEditMode("grammar")}
-              disabled={loading}
-            >
-              Grammar & Punctuation
-            </button>
-          </div>
-
-          <div className="provider-row">
-            <label>
-              Provider
-              <select
-                value={provider}
-                onChange={(event) => {
-                  setProvider(event.target.value as Provider);
-                  setModel("");
-                }}
-                disabled={loading || loadingModels}
-              >
-                <option value="anthropic">Anthropic (Claude)</option>
-                <option value="gemini">Gemini</option>
-                <option value="openrouter">OpenRouter</option>
-              </select>
-            </label>
-            <div className="model-picker-block">
-              <span className="mode-label">Model Picker</span>
-              <div className="model-picker-layout">
-                <label className="model-available-column">
-                  Available models (left)
-                  <select
-                    className="model-available-select"
-                    size={8}
-                    value={selectedKnownModelId}
-                    onChange={(event) => setModel(event.target.value)}
-                    disabled={loading || loadingModels || providerModels[provider].length === 0}
-                  >
-                    <option value="" disabled>
-                      {providerModels[provider].length === 0
-                        ? "Load models first"
-                        : "Type on the right to filter, or click a model"}
-                    </option>
-                    {filteredProviderModels.length === 0 &&
-                      providerModels[provider].length > 0 && (
-                        <option value="__no_match__" disabled>
-                          No models match the text on the right
-                        </option>
-                      )}
-                    {filteredProviderModels.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.label ? `${item.label} (${item.id})` : item.id}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="model-typed-column">
-                  Model override (right)
-                  <input
-                    type="text"
-                    className="model-search-input"
-                    value={model}
-                    onChange={(event) => setModel(event.target.value)}
-                    placeholder="Type model id here (or click one on the left)"
-                    autoComplete="off"
-                    spellCheck={false}
-                    disabled={loading || loadingModels}
-                  />
-                  <p className="subtle model-override-readout">
-                    Current override: {model.trim() || "Use provider default"}
+            <summary className="sidebar-section-summary">
+              <span>
+                {sectionId === "workflow" && "Workflow"}
+                {sectionId === "documents" && "Documents"}
+                {sectionId === "prompt" && "Prompt"}
+                {sectionId === "changes" && "Suggestions"}
+                {sectionId === "context" && "Context Files"}
+                {sectionId === "workspace" && "Workspace Controls"}
+                {sectionId === "direct" && "Manual Typing"}
+                {sectionId === "ai" && "AI Settings"}
+                {sectionId === "appearance" && "Appearance"}
+              </span>
+              <span className="drag-hint">Drag</span>
+            </summary>
+            <div className="sidebar-section-body">
+              {sectionId === "workflow" && (
+                <div className="stack">
+                  <label>
+                    Workspace
+                    <select
+                      value={topMenu}
+                      onChange={(event) => setTopMenu(event.target.value as TopMenu)}
+                      disabled={loading || loadingModels}
+                    >
+                      <option value="editor">Document Editor</option>
+                      <option value="settings">AI Settings</option>
+                    </select>
+                  </label>
+                  <label>
+                    Edit Mode
+                    <select
+                      value={editMode}
+                      onChange={(event) => setEditMode(event.target.value as EditMode)}
+                      disabled={loading}
+                    >
+                      <option value="custom">Targeted Edit</option>
+                      <option value="grammar">Grammar & Punctuation</option>
+                    </select>
+                  </label>
+                  <p className="subtle">
+                    Provider: {provider} | Model: {model.trim() || "Provider default"}
                   </p>
-                </label>
-              </div>
-            </div>
-            <p className="subtle">
-              Showing {filteredProviderModels.length} of {providerModels[provider].length} models
-            </p>
-          </div>
+                </div>
+              )}
 
-          <div className="api-key-menu">
-            <button
-              type="button"
-              className={`api-key-toggle ${showApiKeyMenu ? "api-key-toggle-active" : ""}`}
-              onClick={() => setShowApiKeyMenu((prev) => !prev)}
-              disabled={loading || loadingModels}
-            >
-              {showApiKeyMenu ? "Hide API Key Menu" : "API Key Menu"}
-            </button>
-            <p className="subtle">
-              Active provider key: {apiKeys[provider].trim() ? "Configured" : "Missing"}
-            </p>
-            <label className="remember-toggle">
-              <input
-                type="checkbox"
-                checked={rememberPreferences}
-                onChange={(event) => setRememberPreferences(event.target.checked)}
-                disabled={loading || loadingModels}
-              />
-              Remember keys + model on this device
-            </label>
-            <button type="button" className="api-key-load-btn" onClick={onLoadModels} disabled={loading || loadingModels}>
-              {loadingModels ? "Loading Models..." : `Load Models For ${provider}`}
-            </button>
-            <button
-              type="button"
-              className="api-key-clear-btn"
-              onClick={onClearSavedPreferences}
-              disabled={loading || loadingModels}
-            >
-              Clear Saved Keys + Model
-            </button>
-            {showApiKeyMenu && (
-              <div className="api-key-panel">
-                <label>
-                  Anthropic API Key
-                  <input
-                    type="password"
-                    value={apiKeys.anthropic}
-                    onChange={(event) =>
-                      setApiKeys((prev) => ({
-                        ...prev,
-                        anthropic: event.target.value
-                      }))
-                    }
-                    placeholder="sk-ant-..."
-                    autoComplete="off"
-                    disabled={loading || loadingModels}
-                  />
-                </label>
-                <label>
-                  Gemini API Key
-                  <input
-                    type="password"
-                    value={apiKeys.gemini}
-                    onChange={(event) =>
-                      setApiKeys((prev) => ({
-                        ...prev,
-                        gemini: event.target.value
-                      }))
-                    }
-                    placeholder="AIza..."
-                    autoComplete="off"
-                    disabled={loading || loadingModels}
-                  />
-                </label>
-                <label>
-                  OpenRouter API Key
-                  <input
-                    type="password"
-                    value={apiKeys.openrouter}
-                    onChange={(event) =>
-                      setApiKeys((prev) => ({
-                        ...prev,
-                        openrouter: event.target.value
-                      }))
-                    }
-                    placeholder="sk-or-v1-..."
-                    autoComplete="off"
-                    disabled={loading || loadingModels}
-                  />
-                </label>
-                <p className="subtle">
-                  {rememberPreferences
-                    ? "Keys, selected provider, and model override are saved in this browser."
-                    : "Remember is off. Keys and model override are not saved after exit/reload."}
-                </p>
-              </div>
-            )}
-          </div>
-        </section>
-      )}
-      {error && <p className="error">{error}</p>}
-
-      {topMenu === "editor" && (
-      <main className="workspace">
-        <section className="panel">
-          <div className="panel-title-row">
-            <h2>Current Working Document</h2>
-            <div className="panel-actions">
-              <button
-                type="button"
-                className="session-save-btn"
-                onClick={onSaveWorkspaceForReturn}
-                disabled={loading || !state?.workingBlocks.length}
-              >
-                Save Working for Next Return
-              </button>
-              <button
-                type="button"
-                className="session-remove-saved-btn"
-                onClick={onRemoveSavedWorkspaceForReturn}
-                disabled={loading}
-              >
-                Remove Saved Workspace for Next Return
-              </button>
-              {sessionId && state?.workingBlocks.length ? (
-                <a
-                  className="download-link"
-                  href={workingDownloadUrl(sessionId)}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Download Finished DOCX
-                </a>
-              ) : null}
-              <button
-                type="button"
-                className="danger-btn"
-                onClick={onRemoveSourceDocument}
-                disabled={loading || !state?.workingBlocks.length}
-              >
-                Remove Current Document
-              </button>
-            </div>
-          </div>
-          {state?.sourceFilename && <p className="subtle">Source file: {state.sourceFilename}</p>}
-          {!state?.workingBlocks.length && (
-            <p className="empty">Upload a `.docx` source document to start editing.</p>
-          )}
-          {previewLoading && <p className="subtle">Rendering formatted preview...</p>}
-          {previewError && <p className="error">{previewError}</p>}
-          <div className="doc-view doc-view-formatted">
-            <div ref={previewContainerRef} className="docx-host" />
-          </div>
-          {!!state?.workingBlocks.length && (
-            <div className="manual-edit-panel">
-              <div
-                className={`manual-edit-header ${directEditMode ? "manual-edit-header-active" : ""}`}
-              >
-                <h3>Direct In-Document Editing</h3>
-                <p className="subtle">
-                  Turn this on, click directly in the preview document, and type like Word.
-                </p>
-              </div>
-              <div className="manual-edit-actions">
-                <button
-                  type="button"
-                  className={`direct-edit-toggle-btn ${directEditMode ? "direct-edit-toggle-btn-active" : ""}`}
-                  onClick={onToggleDirectEditMode}
-                  disabled={loading}
-                >
-                  {directEditMode ? "Disable Direct Typing" : "Enable Direct Typing"}
-                </button>
-                <button
-                  type="button"
-                  onClick={onApplyDirectTextEdits}
-                  disabled={loading || !directEditMode}
-                >
-                  Apply Typed Changes
-                </button>
-                <button
-                  type="button"
-                  className="manual-reset-btn"
-                  onClick={onDiscardDirectTextEdits}
-                  disabled={loading}
-                >
-                  Discard Unapplied Typing
-                </button>
-              </div>
-            </div>
-          )}
-          {!!state?.contextFiles.length && (
-            <div className="context-list">
-              <h3>Context Files</h3>
-              {state.contextFiles.map((file) => (
-                <div key={file.id} className="context-row">
-                  <p>
-                    {file.filename} ({file.charCount.toLocaleString()} chars)
+              {sectionId === "documents" && (
+                <div className="stack">
+                  <label className="file-control">
+                    Load main `.docx` file
+                    <input
+                      type="file"
+                      accept=".docx"
+                      onChange={onSourceFileChange}
+                      disabled={loading}
+                    />
+                  </label>
+                  <p className="subtle">
+                    Active document: {state?.sourceFilename || "No source document loaded"}
                   </p>
+                </div>
+              )}
+
+              {sectionId === "prompt" && (
+                <div className="stack">
+                  <label className="prompt-field">
+                    {editMode === "custom"
+                      ? "Tell AI what to change"
+                      : "Grammar mode instructions (optional)"}
+                    <textarea
+                      value={instructionText}
+                      onChange={(event) => setInstructionText(event.target.value)}
+                      placeholder={
+                        editMode === "custom"
+                          ? "Example: tighten wording, improve clarity, keep executive tone."
+                          : "Optional: focus on punctuation consistency and formal business grammar."
+                      }
+                      rows={5}
+                      disabled={loading}
+                    />
+                  </label>
                   <button
                     type="button"
-                    className="danger-btn context-remove-btn"
-                    onClick={() => onRemoveContextFile(file.id)}
-                    disabled={loading}
+                    onClick={onRunModeAction}
+                    disabled={
+                      loading ||
+                      !state?.workingBlocks.length ||
+                      (editMode === "custom" && !instructionText.trim())
+                    }
                   >
-                    Remove
+                    {editMode === "custom"
+                      ? "Generate Suggested Edits"
+                      : "Find Grammar & Punctuation Issues"}
                   </button>
                 </div>
-              ))}
-            </div>
-          )}
-        </section>
+              )}
 
-        <section className="panel">
-          <div className="panel-title-row">
-            <h2>Proposed Edits</h2>
-            <button type="button" onClick={onAcceptAllPending} disabled={loading || pendingCount === 0}>
-              Accept All Pending
-            </button>
-          </div>
-          {!allBatches.length && (
-            <p className="empty">Run a prompt or grammar analysis to generate proposals for review.</p>
-          )}
-          <div className="proposal-list">
-            {allBatches.map((batch) => (
-              <article key={batch.id} className="batch">
-                <header className="batch-header">
-                  <p>
-                    {formatDate(batch.createdAt)} | {batch.provider} | {batch.model}
-                  </p>
-                  <p className="subtle">
-                    Mode: {batch.mode === "grammar" ? "Grammar & Punctuation" : "Targeted Edit"}
-                  </p>
-                  <p className="subtle">Instruction: {batch.prompt}</p>
-                </header>
-                {!batch.edits.length && <p className="empty">No changes were proposed for this run.</p>}
-                {batch.edits.map((edit) => (
-                  <div key={edit.id} className={`edit-card status-${edit.status}`}>
-                    <div
-                      className="diff-content"
-                      dangerouslySetInnerHTML={{
-                        __html: edit.diffHtml
-                      }}
-                    />
-                    {batch.mode === "grammar" &&
-                      (edit.highlightTexts?.length || edit.highlightText) && (
+              {sectionId === "changes" && (
+                <div className="stack">
+                  <button
+                    type="button"
+                    onClick={onAcceptAllPending}
+                    disabled={loading || pendingCount === 0}
+                  >
+                    Accept All Suggestions
+                  </button>
+                  {!pendingEdits.length && (
+                    <p className="empty">No pending suggestions. Run analysis to generate edits.</p>
+                  )}
+                  {pendingEdits.map(({ batch, edit }) => (
+                    <details key={edit.id} className="change-row">
+                      <summary>
+                        <span>
+                          {batch.mode === "grammar" ? "Grammar" : "Targeted"}:{" "}
+                          {(edit.highlightTexts?.[0] || edit.highlightText || edit.originalText).slice(0, 72)}
+                        </span>
+                        <span className="badge">{edit.status}</span>
+                      </summary>
+                      <div className="change-row-body">
                         <p className="subtle">
-                          Detected issue text: "
-                          {(
-                            edit.highlightTexts?.length
-                              ? edit.highlightTexts.slice(0, 4).join('", "')
-                              : edit.highlightText || ""
-                          )}
-                          "
+                          {formatDate(batch.createdAt)} | {batch.provider} | {batch.model}
                         </p>
-                      )}
-                    <p className="rationale">{edit.rationale}</p>
-                    <div className="actions">
-                      <span className="badge">{edit.status}</span>
-                      <button
-                        type="button"
-                        disabled={loading || edit.status !== "pending"}
-                        onClick={() => onDecide(edit.id, "accept")}
-                      >
-                        Accept
-                      </button>
-                      <button
-                        type="button"
-                        disabled={loading || edit.status !== "pending"}
-                        onClick={() => onDecide(edit.id, "reject")}
-                      >
-                        Reject
-                      </button>
+                        <div
+                          className="diff-content"
+                          dangerouslySetInnerHTML={{
+                            __html: edit.diffHtml
+                          }}
+                        />
+                        <p className="rationale">{edit.rationale}</p>
+                        <div className="actions">
+                          <button
+                            type="button"
+                            disabled={loading || edit.status !== "pending"}
+                            onClick={() => onDecide(edit.id, "accept")}
+                          >
+                            Accept
+                          </button>
+                          <button
+                            type="button"
+                            disabled={loading || edit.status !== "pending"}
+                            onClick={() => onDecide(edit.id, "reject")}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              )}
+
+              {sectionId === "context" && (
+                <div className="stack">
+                  <label className="file-control">
+                    Add optional context files
+                    <input
+                      type="file"
+                      accept=".docx,.txt,.md"
+                      multiple
+                      onChange={onContextFileChange}
+                      disabled={loading}
+                    />
+                  </label>
+                  {!state?.contextFiles.length && (
+                    <p className="subtle">No context files uploaded for this session.</p>
+                  )}
+                  {!!state?.contextFiles.length && (
+                    <div className="context-list">
+                      {state.contextFiles.map((file) => (
+                        <div key={file.id} className="context-row">
+                          <p>
+                            {file.filename} ({file.charCount.toLocaleString()} chars)
+                          </p>
+                          <button
+                            type="button"
+                            className="danger-btn context-remove-btn"
+                            onClick={() => onRemoveContextFile(file.id)}
+                            disabled={loading}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
                     </div>
-                  </div>
-                ))}
+                  )}
+                </div>
+              )}
+
+              {sectionId === "workspace" && (
+                <div className="stack">
+                  <button
+                    type="button"
+                    className="session-save-btn"
+                    onClick={onSaveWorkspaceForReturn}
+                    disabled={loading || !state?.workingBlocks.length}
+                  >
+                    Save Workspace for Next Launch
+                  </button>
+                  <button
+                    type="button"
+                    className="session-remove-saved-btn"
+                    onClick={onRemoveSavedWorkspaceForReturn}
+                    disabled={loading}
+                  >
+                    Remove Saved Workspace Snapshot
+                  </button>
+                  {sessionId && state?.workingBlocks.length ? (
+                    <a
+                      className="download-link"
+                      href={workingDownloadUrl(sessionId)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Download Finished DOCX
+                    </a>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="danger-btn"
+                    onClick={onRemoveSourceDocument}
+                    disabled={loading || !state?.workingBlocks.length}
+                  >
+                    Remove Current Document
+                  </button>
+                </div>
+              )}
+
+              {sectionId === "direct" && (
+                <div className="stack">
+                  {!state?.workingBlocks.length && (
+                    <p className="subtle">Load a document to enable direct typing mode.</p>
+                  )}
+                  {!!state?.workingBlocks.length && (
+                    <>
+                      <button
+                        type="button"
+                        className={`direct-edit-toggle-btn ${directEditMode ? "direct-edit-toggle-btn-active" : ""}`}
+                        onClick={onToggleDirectEditMode}
+                        disabled={loading}
+                      >
+                        {directEditMode ? "Disable Direct Typing" : "Enable Direct Typing"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={onApplyDirectTextEdits}
+                        disabled={loading || !directEditMode}
+                      >
+                        Apply Manual Edits to Working Document
+                      </button>
+                      <button
+                        type="button"
+                        className="manual-reset-btn"
+                        onClick={onDiscardDirectTextEdits}
+                        disabled={loading}
+                      >
+                        Discard Unapplied Manual Typing
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {sectionId === "ai" && (
+                <div className="stack">
+                  <label>
+                    AI Provider
+                    <select
+                      value={provider}
+                      onChange={(event) => {
+                        setProvider(event.target.value as Provider);
+                        setModel("");
+                      }}
+                      disabled={loading || loadingModels}
+                    >
+                      <option value="anthropic">Anthropic (Claude)</option>
+                      <option value="gemini">Gemini</option>
+                      <option value="openrouter">OpenRouter</option>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="api-key-load-btn"
+                    onClick={onLoadModels}
+                    disabled={loading || loadingModels}
+                  >
+                    {loadingModels ? "Loading Available Models..." : `Load Models for ${provider}`}
+                  </button>
+                  <label>
+                    Available models
+                    <select
+                      className="model-available-select"
+                      size={8}
+                      value={selectedKnownModelId}
+                      onChange={(event) => setModel(event.target.value)}
+                      disabled={loading || loadingModels || providerModels[provider].length === 0}
+                    >
+                      <option value="" disabled>
+                        {providerModels[provider].length === 0
+                          ? "Load models first"
+                          : "Select a model from this list"}
+                      </option>
+                      {filteredProviderModels.length === 0 && providerModels[provider].length > 0 && (
+                        <option value="__no_match__" disabled>
+                          No models match typed text
+                        </option>
+                      )}
+                      {filteredProviderModels.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.label ? `${item.label} (${item.id})` : item.id}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Model override text
+                    <input
+                      type="text"
+                      className="model-search-input"
+                      value={model}
+                      onChange={(event) => setModel(event.target.value)}
+                      placeholder="Type model id to filter/select"
+                      autoComplete="off"
+                      spellCheck={false}
+                      disabled={loading || loadingModels}
+                    />
+                  </label>
+                  <p className="subtle">
+                    Showing {filteredProviderModels.length} of {providerModels[provider].length} models
+                  </p>
+
+                  <label className="remember-toggle">
+                    <input
+                      type="checkbox"
+                      checked={rememberPreferences}
+                      onChange={(event) => setRememberPreferences(event.target.checked)}
+                      disabled={loading || loadingModels}
+                    />
+                    Remember API keys and model on this device
+                  </label>
+
+                  <button
+                    type="button"
+                    className={`api-key-toggle ${showApiKeyMenu ? "api-key-toggle-active" : ""}`}
+                    onClick={() => setShowApiKeyMenu((prev) => !prev)}
+                    disabled={loading || loadingModels}
+                  >
+                    {showApiKeyMenu ? "Hide API Key Inputs" : "Show API Key Inputs"}
+                  </button>
+
+                  {showApiKeyMenu && (
+                    <div className="api-key-panel">
+                      <label>
+                        Anthropic API Key
+                        <input
+                          type="password"
+                          value={apiKeys.anthropic}
+                          onChange={(event) =>
+                            setApiKeys((prev) => ({
+                              ...prev,
+                              anthropic: event.target.value
+                            }))
+                          }
+                          placeholder="sk-ant-..."
+                          autoComplete="off"
+                          disabled={loading || loadingModels}
+                        />
+                      </label>
+                      <label>
+                        Gemini API Key
+                        <input
+                          type="password"
+                          value={apiKeys.gemini}
+                          onChange={(event) =>
+                            setApiKeys((prev) => ({
+                              ...prev,
+                              gemini: event.target.value
+                            }))
+                          }
+                          placeholder="AIza..."
+                          autoComplete="off"
+                          disabled={loading || loadingModels}
+                        />
+                      </label>
+                      <label>
+                        OpenRouter API Key
+                        <input
+                          type="password"
+                          value={apiKeys.openrouter}
+                          onChange={(event) =>
+                            setApiKeys((prev) => ({
+                              ...prev,
+                              openrouter: event.target.value
+                            }))
+                          }
+                          placeholder="sk-or-v1-..."
+                          autoComplete="off"
+                          disabled={loading || loadingModels}
+                        />
+                      </label>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className="api-key-clear-btn"
+                    onClick={onClearSavedPreferences}
+                    disabled={loading || loadingModels}
+                  >
+                    Clear Saved AI Credentials and Model
+                  </button>
+                </div>
+              )}
+
+              {sectionId === "appearance" && (
+                <div className="stack">
+                  <label>
+                    Overall app color
+                    <input
+                      type="color"
+                      value={themeSettings.overallColor}
+                      onChange={(event) =>
+                        setThemeSettings((prev) => ({
+                          ...prev,
+                          overallColor: event.target.value
+                        }))
+                      }
+                      disabled={loading || loadingModels}
+                    />
+                  </label>
+                  <label>
+                    Main UI panel color
+                    <input
+                      type="color"
+                      value={themeSettings.mainUiColor}
+                      onChange={(event) =>
+                        setThemeSettings((prev) => ({
+                          ...prev,
+                          mainUiColor: event.target.value
+                        }))
+                      }
+                      disabled={loading || loadingModels}
+                    />
+                  </label>
+                  <label>
+                    Button accent color
+                    <input
+                      type="color"
+                      value={themeSettings.accentColor}
+                      onChange={(event) =>
+                        setThemeSettings((prev) => ({
+                          ...prev,
+                          accentColor: event.target.value
+                        }))
+                      }
+                      disabled={loading || loadingModels}
+                    />
+                  </label>
+                  <button type="button" onClick={onResetThemeDefaults} disabled={loading || loadingModels}>
+                    Restore Default Theme
+                  </button>
+                </div>
+              )}
+            </div>
+          </details>
+        ))}
+      </aside>
+
+      <main className="main-stage">
+        {topMenu === "editor" ? (
+          <section className="document-stage">
+            <header className="document-stage-header">
+              <h2>Current Working Document</h2>
+              <p className="subtle">
+                Hover red highlights to review why each word changes. Accept or reject directly in
+                the document or from the sidebar suggestions list.
+              </p>
+            </header>
+            {!state?.workingBlocks.length && (
+              <p className="empty">Load a `.docx` file to begin reviewing and editing.</p>
+            )}
+            {previewLoading && <p className="subtle">Rendering formatted Word preview...</p>}
+            {previewError && <p className="error">{previewError}</p>}
+            <div className="doc-view doc-view-formatted">
+              <div ref={previewContainerRef} className="docx-host" />
+            </div>
+          </section>
+        ) : (
+          <section className="settings-stage">
+            <h2>AI Settings</h2>
+            <p className="subtle">
+              Use the sidebar cards to configure model provider, API keys, edit mode, and color
+              preferences.
+            </p>
+            <div className="settings-summary-grid">
+              <article className="settings-summary-card">
+                <h3>Active Workspace</h3>
+                <p className="subtle">View: AI Settings</p>
+                <p className="subtle">
+                  Edit mode: {editMode === "grammar" ? "Grammar & Punctuation" : "Targeted Edit"}
+                </p>
               </article>
-            ))}
-          </div>
-        </section>
+              <article className="settings-summary-card">
+                <h3>Model Selection</h3>
+                <p className="subtle">Provider: {provider}</p>
+                <p className="subtle">Model: {model.trim() || "Provider default"}</p>
+                <p className="subtle">
+                  Saved models for provider: {providerModels[provider].length.toLocaleString()}
+                </p>
+              </article>
+              <article className="settings-summary-card">
+                <h3>Credential State</h3>
+                <p className="subtle">Provider key present: {apiKeys[provider].trim() ? "Yes" : "No"}</p>
+                <p className="subtle">
+                  Remember setting: {rememberPreferences ? "On (stored locally)" : "Off"}
+                </p>
+              </article>
+            </div>
+          </section>
+        )}
       </main>
-      )}
     </div>
   );
 }
 
 export default App;
+
