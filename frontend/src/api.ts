@@ -157,17 +157,6 @@ export async function decideEdit(
   await parseJson(response);
 }
 
-export async function promoteWorking(sessionId: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/api/session/${sessionId}/promote-working`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ confirm: true })
-  });
-  await parseJson(response);
-}
-
 export async function saveWorkspace(sessionId: string): Promise<{ savedAt: string }> {
   const response = await fetch(`${API_BASE}/api/session/${sessionId}/save-workspace`, {
     method: "POST"

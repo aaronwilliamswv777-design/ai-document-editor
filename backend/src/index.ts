@@ -48,10 +48,6 @@ const decisionSchema = z.object({
   decision: z.enum(["accept", "reject"])
 });
 
-const promoteSchema = z.object({
-  confirm: z.literal(true)
-});
-
 const listModelsSchema = z.object({
   provider: z.enum(["anthropic", "gemini", "openrouter"]),
   apiKey: z.string().min(10).optional()
@@ -772,33 +768,6 @@ app.post("/api/session/:id/edits/accept-all", async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       error: error instanceof Error ? error.message : "Failed to accept all pending edits."
-    });
-  }
-});
-
-app.post("/api/session/:id/promote-working", (req, res) => {
-  try {
-    const session = getSession(readRouteParam(req.params.id));
-    if (!session) {
-      return res.status(404).json({ error: "Session not found." });
-    }
-
-    promoteSchema.parse(req.body);
-    session.sourceBlocks = cloneBlocks(session.workingBlocks);
-    session.sourceDocxBuffer = cloneBuffer(session.workingDocxBuffer);
-    updateSession(session);
-
-    return res.json({
-      ok: true,
-      sourceBlockCount: session.sourceBlocks.length
-    });
-  } catch (error) {
-    if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: "Confirmation required." });
-    }
-
-    return res.status(500).json({
-      error: error instanceof Error ? error.message : "Failed to promote working copy."
     });
   }
 });

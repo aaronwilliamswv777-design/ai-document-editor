@@ -9,7 +9,6 @@ import {
   fetchPreviewDoc,
   fetchState,
   Provider,
-  promoteWorking,
   proposeEdits,
   removeContext,
   removeSavedWorkspace,
@@ -280,7 +279,7 @@ function applyGrammarHighlights(container: HTMLElement, highlights: GrammarHighl
 }
 
 function App() {
-  const uiRevision = "model-picker-v8";
+  const uiRevision = "model-picker-v9";
   const [sessionId, setSessionId] = useState<string>("");
   const [state, setState] = useState<SessionState | null>(null);
   const [instructionText, setInstructionText] = useState("");
@@ -579,30 +578,6 @@ function App() {
       setStatus(`Accepted ${result.acceptedCount} pending edit(s).`);
     } catch (acceptError) {
       setError(acceptError instanceof Error ? acceptError.message : "Failed to accept all edits.");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function onPromoteWorking(): Promise<void> {
-    if (!sessionId) {
-      return;
-    }
-    const confirmed = window.confirm(
-      "This will overwrite the session's source copy with the current working document. Continue?"
-    );
-    if (!confirmed) {
-      return;
-    }
-
-    try {
-      setLoading(true);
-      setError("");
-      await promoteWorking(sessionId);
-      await refresh(sessionId);
-      setStatus("Working copy promoted to source baseline.");
-    } catch (promoteError) {
-      setError(promoteError instanceof Error ? promoteError.message : "Failed to promote working copy.");
     } finally {
       setLoading(false);
     }
@@ -928,19 +903,6 @@ function App() {
           <p className="subtle">
             Showing {filteredProviderModels.length} of {providerModels[provider].length} models
           </p>
-          {sessionId && (
-            <a
-              className="download-link"
-              href={workingDownloadUrl(sessionId)}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Download Working `.docx`
-            </a>
-          )}
-          <button type="button" onClick={onPromoteWorking} disabled={loading || !state?.workingBlocks.length}>
-            Promote Working to Source
-          </button>
         </div>
 
         <div className="api-key-menu">
@@ -1105,6 +1067,16 @@ function App() {
               >
                 Remove Saved For Next Return
               </button>
+              {sessionId && state?.workingBlocks.length ? (
+                <a
+                  className="download-link"
+                  href={workingDownloadUrl(sessionId)}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  donwload finished docx
+                </a>
+              ) : null}
               <button
                 type="button"
                 className="danger-btn"
