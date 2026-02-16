@@ -177,6 +177,26 @@ label input,
   border-color: #495c2d;
 }
 
+.remember-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #273233;
+}
+
+.remember-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.api-key-clear-btn {
+  justify-self: start;
+  background: #7a5149;
+  border-color: #674138;
+}
+
 .api-key-panel {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

@@ -20,6 +20,13 @@ import { ProposalBatch, SessionState } from "./types";
 type EditMode = "custom" | "grammar";
 type ProviderKeyMap = Record<Provider, string>;
 type ProviderModelMap = Record<Provider, Array<{ id: string; label?: string }>>;
+type PersistedPreferences = {
+  provider?: Provider;
+  model?: string;
+  apiKeys?: Partial<ProviderKeyMap>;
+};
+const PREFERENCES_STORAGE_KEY = "doc-edit.preferences.v1";
+const REMEMBER_SETTINGS_KEY = "doc-edit.remember-settings.v1";
 
 type GrammarHighlight = {
   blockId: string;
@@ -31,6 +38,10 @@ type GrammarHighlight = {
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString();
+}
+
+function isProviderValue(value: unknown): value is Provider {
+  return value === "anthropic" || value === "gemini" || value === "openrouter";
 }
 
 function isInsideExistingGrammarHighlight(node: Node): boolean {
@@ -264,7 +275,7 @@ function applyGrammarHighlights(container: HTMLElement, highlights: GrammarHighl
 }
 
 function App() {
-  const uiRevision = "model-picker-v3";
+  const uiRevision = "model-picker-v5";
   const [sessionId, setSessionId] = useState<string>("");
   const [state, setState] = useState<SessionState | null>(null);
   const [instructionText, setInstructionText] = useState("");
@@ -282,6 +293,8 @@ function App() {
     gemini: "",
     openrouter: ""
   });
+  const [rememberPreferences, setRememberPreferences] = useState(false);
+  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingModels, setLoadingModels] = useState(false);
   const [error, setError] = useState("");
@@ -294,6 +307,65 @@ function App() {
     const next = await fetchState(targetSessionId);
     setState(next);
   }
+
+  useEffect(() => {
+    try {
+      const rememberRaw = window.localStorage.getItem(REMEMBER_SETTINGS_KEY);
+      const shouldRemember = rememberRaw === "1";
+      setRememberPreferences(shouldRemember);
+      if (!shouldRemember) {
+        return;
+      }
+
+      const raw = window.localStorage.getItem(PREFERENCES_STORAGE_KEY);
+      if (!raw) {
+        return;
+      }
+      const parsed = JSON.parse(raw) as PersistedPreferences;
+      if (isProviderValue(parsed.provider)) {
+        setProvider(parsed.provider);
+      }
+      if (typeof parsed.model === "string") {
+        setModel(parsed.model);
+      }
+      if (parsed.apiKeys && typeof parsed.apiKeys === "object") {
+        setApiKeys((prev) => ({
+          anthropic:
+            typeof parsed.apiKeys?.anthropic === "string"
+              ? parsed.apiKeys.anthropic
+              : prev.anthropic,
+          gemini:
+            typeof parsed.apiKeys?.gemini === "string" ? parsed.apiKeys.gemini : prev.gemini,
+          openrouter:
+            typeof parsed.apiKeys?.openrouter === "string"
+              ? parsed.apiKeys.openrouter
+              : prev.openrouter
+        }));
+      }
+    } catch {
+      // Ignore corrupt local storage.
+    } finally {
+      setPreferencesLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!preferencesLoaded) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(REMEMBER_SETTINGS_KEY, rememberPreferences ? "1" : "0");
+      if (!rememberPreferences) {
+        window.localStorage.removeItem(PREFERENCES_STORAGE_KEY);
+        return;
+      }
+
+      const payload: PersistedPreferences = { provider, model, apiKeys };
+      window.localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // Ignore browser storage failures.
+    }
+  }, [preferencesLoaded, rememberPreferences, provider, model, apiKeys]);
 
   useEffect(() => {
     async function init() {
@@ -444,6 +516,25 @@ function App() {
     } finally {
       setLoadingModels(false);
     }
+  }
+
+  function onClearSavedPreferences(): void {
+    try {
+      window.localStorage.removeItem(PREFERENCES_STORAGE_KEY);
+      window.localStorage.removeItem(REMEMBER_SETTINGS_KEY);
+    } catch {
+      // Ignore browser storage failures.
+    }
+
+    setRememberPreferences(false);
+    setProvider("anthropic");
+    setModel("");
+    setApiKeys({
+      anthropic: "",
+      gemini: "",
+      openrouter: ""
+    });
+    setStatus("Cleared saved provider, model override, and API keys for this browser.");
   }
 
   async function onDecide(editId: string, decision: "accept" | "reject"): Promise<void> {
@@ -765,8 +856,25 @@ function App() {
           <p className="subtle">
             Active provider key: {apiKeys[provider].trim() ? "Configured" : "Missing"}
           </p>
+          <label className="remember-toggle">
+            <input
+              type="checkbox"
+              checked={rememberPreferences}
+              onChange={(event) => setRememberPreferences(event.target.checked)}
+              disabled={loading || loadingModels}
+            />
+            Remember keys + model on this device
+          </label>
           <button type="button" className="api-key-load-btn" onClick={onLoadModels} disabled={loading || loadingModels}>
             {loadingModels ? "Loading Models..." : `Load Models For ${provider}`}
+          </button>
+          <button
+            type="button"
+            className="api-key-clear-btn"
+            onClick={onClearSavedPreferences}
+            disabled={loading || loadingModels}
+          >
+            Clear Saved Keys + Model
           </button>
           {showApiKeyMenu && (
             <div className="api-key-panel">
@@ -818,7 +926,11 @@ function App() {
                   disabled={loading || loadingModels}
                 />
               </label>
-              <p className="subtle">Keys are used only for this browser session.</p>
+              <p className="subtle">
+                {rememberPreferences
+                  ? "Keys, selected provider, and model override are saved in this browser."
+                  : "Remember is off. Keys and model override are not saved after exit/reload."}
+              </p>
             </div>
           )}
         </div>
