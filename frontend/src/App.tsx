@@ -264,6 +264,7 @@ function applyGrammarHighlights(container: HTMLElement, highlights: GrammarHighl
 }
 
 function App() {
+  const uiRevision = "model-picker-v3";
   const [sessionId, setSessionId] = useState<string>("");
   const [state, setState] = useState<SessionState | null>(null);
   const [instructionText, setInstructionText] = useState("");
@@ -431,9 +432,10 @@ function App() {
       }
 
       const hasCurrent = result.models.some((item) => item.id === model);
-      if (!hasCurrent) {
+      if (!hasCurrent && !model.trim()) {
         const defaultExists = result.models.some((item) => item.id === result.defaultModel);
-        setModel(defaultExists ? result.defaultModel : result.models[0].id);
+        const nextModel = defaultExists ? result.defaultModel : result.models[0].id;
+        setModel(nextModel);
       }
 
       setStatus(`Loaded ${result.models.length} models for ${provider}.`);
@@ -517,6 +519,22 @@ function App() {
       .flatMap((batch) => batch.edits)
       .filter((edit) => edit.status === "pending").length;
   }, [state]);
+
+  const filteredProviderModels = useMemo(() => {
+    const query = model.trim().toLowerCase();
+    const options = providerModels[provider];
+    if (!query) {
+      return options;
+    }
+    return options.filter((item) =>
+      `${item.label || ""} ${item.id}`.toLowerCase().includes(query)
+    );
+  }, [model, provider, providerModels]);
+
+  const selectedKnownModelId = useMemo(() => {
+    const known = providerModels[provider].some((item) => item.id === model.trim());
+    return known ? model.trim() : "";
+  }, [providerModels, provider, model]);
 
   const grammarHighlights = useMemo(() => {
     if (!state) {
@@ -632,6 +650,7 @@ function App() {
         <div className="meta">
           <span>{status}</span>
           <span>Pending edits: {pendingCount}</span>
+          <span>UI rev: {uiRevision}</span>
         </div>
       </header>
 
@@ -668,23 +687,56 @@ function App() {
               <option value="openrouter">OpenRouter</option>
             </select>
           </label>
-          <label>
-            Model
-            <select
-              value={model}
-              onChange={(event) => setModel(event.target.value)}
-              disabled={loading || loadingModels}
-            >
-              <option value="">Use provider default</option>
-              {providerModels[provider].map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.label ? `${item.label} (${item.id})` : item.id}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="model-picker-block">
+            <span className="mode-label">Model Picker</span>
+            <div className="model-picker-layout">
+              <label className="model-available-column">
+                Available models (left)
+                <select
+                  className="model-available-select"
+                  size={8}
+                  value={selectedKnownModelId}
+                  onChange={(event) => setModel(event.target.value)}
+                  disabled={loading || loadingModels || providerModels[provider].length === 0}
+                >
+                  <option value="" disabled>
+                    {providerModels[provider].length === 0
+                      ? "Load models first"
+                      : "Type on the right to filter, or click a model"}
+                  </option>
+                  {filteredProviderModels.length === 0 &&
+                    providerModels[provider].length > 0 && (
+                      <option value="__no_match__" disabled>
+                        No models match the text on the right
+                      </option>
+                    )}
+                  {filteredProviderModels.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.label ? `${item.label} (${item.id})` : item.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="model-typed-column">
+                Model override (right)
+                <input
+                  type="text"
+                  className="model-search-input"
+                  value={model}
+                  onChange={(event) => setModel(event.target.value)}
+                  placeholder="Type model id here (or click one on the left)"
+                  autoComplete="off"
+                  spellCheck={false}
+                  disabled={loading || loadingModels}
+                />
+                <p className="subtle model-override-readout">
+                  Current override: {model.trim() || "Use provider default"}
+                </p>
+              </label>
+            </div>
+          </div>
           <p className="subtle">
-            Available models: {providerModels[provider].length}
+            Showing {filteredProviderModels.length} of {providerModels[provider].length} models
           </p>
           {sessionId && (
             <a

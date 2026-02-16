@@ -93,6 +93,46 @@ body {
   align-items: end;
 }
 
+.model-picker-block {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  background: #fffdf7;
+  display: grid;
+  gap: 6px;
+  grid-column: 1 / -1;
+}
+
+.model-picker-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.model-available-column,
+.model-typed-column {
+  display: flex;
+  flex-direction: column;
+  font-weight: 600;
+}
+
+.model-available-select {
+  margin-top: 4px;
+  min-height: 170px;
+}
+
+.model-search-input {
+  margin-bottom: 6px;
+}
+
+.model-override-readout {
+  margin-top: 0;
+  margin-bottom: 6px;
+  font-size: 0.82rem;
+  color: #273233;
+  word-break: break-all;
+}
+
 label select,
 label input,
 .prompt-field textarea {
@@ -429,6 +469,10 @@ button:disabled {
 
 @media (max-width: 960px) {
   .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .model-picker-layout {
     grid-template-columns: 1fr;
   }
 }
