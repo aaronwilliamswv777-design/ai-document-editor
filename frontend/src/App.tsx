@@ -34,6 +34,8 @@ type PersistedPreferences = {
 const PREFERENCES_STORAGE_KEY = "doc-edit.preferences.v1";
 const REMEMBER_SETTINGS_KEY = "doc-edit.remember-settings.v1";
 const MODEL_CATALOG_STORAGE_KEY = "doc-edit.model-catalog.v1";
+const EDIT_MODE_STORAGE_KEY = "doc-edit.ui.edit-mode.v1";
+const TOP_MENU_STORAGE_KEY = "doc-edit.ui.top-menu.v1";
 
 type GrammarHighlight = {
   blockId: string;
@@ -49,6 +51,14 @@ function formatDate(iso: string): string {
 
 function isProviderValue(value: unknown): value is Provider {
   return value === "anthropic" || value === "gemini" || value === "openrouter";
+}
+
+function isEditModeValue(value: unknown): value is EditMode {
+  return value === "custom" || value === "grammar";
+}
+
+function isTopMenuValue(value: unknown): value is TopMenu {
+  return value === "editor" || value === "settings";
 }
 
 function createEmptyProviderModels(): ProviderModelMap {
@@ -430,7 +440,7 @@ function applyGrammarHighlights(container: HTMLElement, highlights: GrammarHighl
 }
 
 function App() {
-  const uiRevision = "menu-split-v16";
+  const uiRevision = "menu-split-v17";
   const [sessionId, setSessionId] = useState<string>("");
   const [state, setState] = useState<SessionState | null>(null);
   const [instructionText, setInstructionText] = useState("");
@@ -463,6 +473,15 @@ function App() {
 
   useEffect(() => {
     try {
+      const savedEditMode = window.localStorage.getItem(EDIT_MODE_STORAGE_KEY);
+      if (isEditModeValue(savedEditMode)) {
+        setEditMode(savedEditMode);
+      }
+      const savedTopMenu = window.localStorage.getItem(TOP_MENU_STORAGE_KEY);
+      if (isTopMenuValue(savedTopMenu)) {
+        setTopMenu(savedTopMenu);
+      }
+
       const rawCatalog = window.localStorage.getItem(MODEL_CATALOG_STORAGE_KEY);
       if (rawCatalog) {
         const parsedCatalog = JSON.parse(rawCatalog) as unknown;
@@ -525,6 +544,18 @@ function App() {
       // Ignore browser storage failures.
     }
   }, [preferencesLoaded, rememberPreferences, provider, model, apiKeys]);
+
+  useEffect(() => {
+    if (!preferencesLoaded) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(EDIT_MODE_STORAGE_KEY, editMode);
+      window.localStorage.setItem(TOP_MENU_STORAGE_KEY, topMenu);
+    } catch {
+      // Ignore browser storage failures.
+    }
+  }, [preferencesLoaded, editMode, topMenu]);
 
   useEffect(() => {
     if (!preferencesLoaded) {
