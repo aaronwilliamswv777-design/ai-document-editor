@@ -86,6 +86,20 @@ export async function removeContext(sessionId: string, contextId: string): Promi
   await parseJson(response);
 }
 
+export async function applyManualEdit(
+  sessionId: string,
+  edits: Array<{ blockId: string; text: string }>
+): Promise<{ updatedCount: number }> {
+  const response = await fetch(`${API_BASE}/api/session/${sessionId}/manual-edit`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ edits })
+  });
+  return parseJson(response);
+}
+
 export async function proposeEdits(
   sessionId: string,
   payload: {

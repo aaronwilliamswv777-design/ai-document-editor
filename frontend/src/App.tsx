@@ -2,6 +2,7 @@ import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { renderAsync } from "docx-preview";
 import {
   acceptAllEdits,
+  applyManualEdit,
   analyzeGrammar,
   createSession,
   decideEdit,
@@ -139,6 +140,101 @@ function normalizeSearchText(value: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
+}
+
+function normalizeEditableText(value: string): string {
+  return value
+    .replace(/\u00a0/g, " ")
+    .replace(/\r/g, "")
+    .replace(/\n+/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+
+function collectEditableParagraphElements(container: HTMLElement): HTMLElement[] {
+  const paragraphs = Array.from(
+    container.querySelectorAll<HTMLElement>(".docx p, .docx li, .docx td, .docx th")
+  );
+  if (paragraphs.length > 0) {
+    return paragraphs;
+  }
+  return Array.from(container.querySelectorAll<HTMLElement>(".docx *")).filter(
+    (element) => normalizeSearchText(element.textContent || "").length > 0
+  );
+}
+
+function bindEditablePreviewBlocks(
+  container: HTMLElement,
+  blocks: SessionState["workingBlocks"],
+  editable: boolean
+): void {
+  const candidates = collectEditableParagraphElements(container);
+  candidates.forEach((element) => {
+    element.removeAttribute("data-block-id");
+    element.classList.remove("manual-editable-block");
+    element.contentEditable = "false";
+    element.spellcheck = false;
+  });
+
+  let cursor = 0;
+  const usedIndices = new Set<number>();
+  for (const block of blocks) {
+    const normalizedBlockText = normalizeEditableText(block.text);
+    if (!normalizedBlockText) {
+      continue;
+    }
+
+    let matchIndex = -1;
+    for (let index = cursor; index < candidates.length; index += 1) {
+      if (usedIndices.has(index)) {
+        continue;
+      }
+      const candidateText = normalizeEditableText(candidates[index].textContent || "");
+      if (!candidateText) {
+        continue;
+      }
+      if (candidateText === normalizedBlockText) {
+        matchIndex = index;
+        break;
+      }
+    }
+
+    if (matchIndex < 0) {
+      const blockHead = normalizedBlockText.slice(0, 80);
+      for (let index = cursor; index < candidates.length; index += 1) {
+        if (usedIndices.has(index)) {
+          continue;
+        }
+        const candidateText = normalizeEditableText(candidates[index].textContent || "");
+        if (!candidateText) {
+          continue;
+        }
+        const candidateHead = candidateText.slice(0, 80);
+        if (
+          (blockHead.length >= 3 && candidateText.includes(blockHead)) ||
+          (candidateHead.length >= 3 && normalizedBlockText.includes(candidateHead))
+        ) {
+          matchIndex = index;
+          break;
+        }
+      }
+    }
+
+    if (matchIndex < 0) {
+      continue;
+    }
+
+    const element = candidates[matchIndex];
+    element.dataset.blockId = block.id;
+    usedIndices.add(matchIndex);
+    cursor = matchIndex + 1;
+
+    if (editable) {
+      element.contentEditable = "true";
+      element.spellcheck = true;
+      element.classList.add("manual-editable-block");
+    }
+  }
 }
 
 function extractAtomicHighlightTargets(value: string): string[] {
@@ -334,7 +430,7 @@ function applyGrammarHighlights(container: HTMLElement, highlights: GrammarHighl
 }
 
 function App() {
-  const uiRevision = "menu-split-v13";
+  const uiRevision = "menu-split-v16";
   const [sessionId, setSessionId] = useState<string>("");
   const [state, setState] = useState<SessionState | null>(null);
   const [instructionText, setInstructionText] = useState("");
@@ -357,6 +453,7 @@ function App() {
   const [status, setStatus] = useState("Creating session...");
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState("");
+  const [directEditMode, setDirectEditMode] = useState(false);
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
 
   async function refresh(targetSessionId: string): Promise<void> {
@@ -740,6 +837,95 @@ function App() {
     }
   }
 
+  function onToggleDirectEditMode(): void {
+    setDirectEditMode((previous) => {
+      const next = !previous;
+      setStatus(
+        next
+          ? "Direct edit mode enabled. Click into the document preview and type."
+          : "Direct edit mode disabled."
+      );
+      return next;
+    });
+  }
+
+  function collectDirectPreviewEdits(): Array<{ blockId: string; text: string }> {
+    if (!state?.workingBlocks.length || !previewContainerRef.current) {
+      return [];
+    }
+
+    const blockTextById = new Map(state.workingBlocks.map((block) => [block.id, block.text]));
+    const editableElements = Array.from(
+      previewContainerRef.current.querySelectorAll<HTMLElement>("[data-block-id]")
+    );
+
+    const edits: Array<{ blockId: string; text: string }> = [];
+    for (const element of editableElements) {
+      const blockId = element.dataset.blockId;
+      if (!blockId) {
+        continue;
+      }
+      const currentText = blockTextById.get(blockId);
+      if (typeof currentText !== "string") {
+        continue;
+      }
+
+      const nextText = (element.textContent || "")
+        .replace(/\u00a0/g, " ")
+        .replace(/\r/g, "")
+        .replace(/\n+/g, " ");
+      if (nextText !== currentText) {
+        edits.push({
+          blockId,
+          text: nextText
+        });
+      }
+    }
+    return edits;
+  }
+
+  async function onApplyDirectTextEdits(): Promise<void> {
+    if (!sessionId || !state?.workingBlocks.length) {
+      return;
+    }
+
+    const edits = collectDirectPreviewEdits();
+    if (edits.length === 0) {
+      setStatus("No typed changes to apply.");
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError("");
+      const result = await applyManualEdit(sessionId, edits);
+      await refresh(sessionId);
+      setStatus(`Applied ${result.updatedCount} typed change(s) to the working document.`);
+    } catch (applyError) {
+      setError(applyError instanceof Error ? applyError.message : "Failed to apply typed changes.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onDiscardDirectTextEdits(): Promise<void> {
+    if (!sessionId) {
+      return;
+    }
+    try {
+      setLoading(true);
+      setError("");
+      await refresh(sessionId);
+      setStatus("Discarded unapplied direct edits.");
+    } catch (discardError) {
+      setError(
+        discardError instanceof Error ? discardError.message : "Failed to discard direct edits."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
   const allBatches = useMemo(() => {
     if (!state) {
       return [] as ProposalBatch[];
@@ -857,7 +1043,10 @@ function App() {
         }
         previewContainerRef.current.innerHTML = "";
         await renderAsync(fileBuffer, previewContainerRef.current);
-        applyGrammarHighlights(previewContainerRef.current, grammarHighlights);
+        if (!directEditMode) {
+          applyGrammarHighlights(previewContainerRef.current, grammarHighlights);
+        }
+        bindEditablePreviewBlocks(previewContainerRef.current, state.workingBlocks, directEditMode);
       } catch (renderError) {
         if (!cancelled) {
           setPreviewError(
@@ -877,7 +1066,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [topMenu, sessionId, state, grammarHighlights]);
+  }, [topMenu, sessionId, state, grammarHighlights, directEditMode]);
 
   return (
     <div className="app">
@@ -1212,6 +1401,43 @@ function App() {
           <div className="doc-view doc-view-formatted">
             <div ref={previewContainerRef} className="docx-host" />
           </div>
+          {!!state?.workingBlocks.length && (
+            <div className="manual-edit-panel">
+              <div
+                className={`manual-edit-header ${directEditMode ? "manual-edit-header-active" : ""}`}
+              >
+                <h3>Direct In-Document Editing</h3>
+                <p className="subtle">
+                  Turn this on, click directly in the preview document, and type like Word.
+                </p>
+              </div>
+              <div className="manual-edit-actions">
+                <button
+                  type="button"
+                  className={`direct-edit-toggle-btn ${directEditMode ? "direct-edit-toggle-btn-active" : ""}`}
+                  onClick={onToggleDirectEditMode}
+                  disabled={loading}
+                >
+                  {directEditMode ? "Disable Direct Typing" : "Enable Direct Typing"}
+                </button>
+                <button
+                  type="button"
+                  onClick={onApplyDirectTextEdits}
+                  disabled={loading || !directEditMode}
+                >
+                  Apply Typed Changes
+                </button>
+                <button
+                  type="button"
+                  className="manual-reset-btn"
+                  onClick={onDiscardDirectTextEdits}
+                  disabled={loading}
+                >
+                  Discard Unapplied Typing
+                </button>
+              </div>
+            </div>
+          )}
           {!!state?.contextFiles.length && (
             <div className="context-list">
               <h3>Context Files</h3>

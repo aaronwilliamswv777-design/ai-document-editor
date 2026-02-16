@@ -48,6 +48,18 @@ const decisionSchema = z.object({
   decision: z.enum(["accept", "reject"])
 });
 
+const manualEditSchema = z.object({
+  edits: z
+    .array(
+      z.object({
+        blockId: z.string().min(1),
+        text: z.string().max(30_000)
+      })
+    )
+    .min(1)
+    .max(5000)
+});
+
 const listModelsSchema = z.object({
   provider: z.enum(["anthropic", "gemini", "openrouter"]),
   apiKey: z.string().min(10).optional()
@@ -520,6 +532,69 @@ app.get("/api/session/:id/state", (req, res) => {
     })),
     proposalHistory: session.proposalHistory
   });
+});
+
+app.post("/api/session/:id/manual-edit", async (req, res) => {
+  try {
+    const session = getSession(readRouteParam(req.params.id));
+    if (!session) {
+      return res.status(404).json({ error: "Session not found." });
+    }
+    if (!session.workingDocxBuffer || !session.workingBlocks.length) {
+      return res.status(400).json({ error: "Upload a source document first." });
+    }
+
+    const payload = manualEditSchema.parse(req.body);
+    const blockMap = new Map(session.workingBlocks.map((block) => [block.id, block]));
+    const updates: Array<{ blockId: string; text: string }> = [];
+
+    for (const edit of payload.edits) {
+      const block = blockMap.get(edit.blockId);
+      if (!block) {
+        continue;
+      }
+
+      const normalizedText = edit.text.replace(/\u00a0/g, " ").replace(/\r/g, "");
+      if (block.text === normalizedText) {
+        continue;
+      }
+
+      block.text = normalizedText;
+      updates.push({
+        blockId: edit.blockId,
+        text: normalizedText
+      });
+    }
+
+    if (updates.length === 0) {
+      return res.json({
+        ok: true,
+        updatedCount: 0
+      });
+    }
+
+    session.workingDocxBuffer = await applyEditsToDocxBuffer({
+      buffer: session.workingDocxBuffer,
+      updates,
+      bindings: session.blockBindings
+    });
+
+    updateSession(session);
+    return res.json({
+      ok: true,
+      updatedCount: updates.length
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: "Invalid manual edit payload.",
+        issues: error.issues
+      });
+    }
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to apply manual edits."
+    });
+  }
 });
 
 app.post("/api/session/:id/propose-edits", async (req, res) => {
