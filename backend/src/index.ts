@@ -9,11 +9,15 @@ import { createSession, deleteSession, getSession, updateSession } from "./sessi
 import {
   applyEditsToDocxBuffer,
   buildDiffHtml,
-  extractTextFromDocx,
   extractTextFromGenericContext,
   parseDocxToBlocks
 } from "./services/documentService.js";
 import { generateEdits, listProviderModels } from "./services/aiService.js";
+import {
+  clearSavedWorkspaceSnapshot,
+  loadSavedWorkspaceSnapshot,
+  saveWorkspaceSnapshot
+} from "./services/workspaceSaveService.js";
 import { ProposalBatch } from "./types.js";
 
 const app = express();
@@ -327,6 +331,55 @@ app.post("/api/session", (_req, res) => {
   });
 });
 
+app.post("/api/session/restore-saved", async (_req, res) => {
+  try {
+    const saved = await loadSavedWorkspaceSnapshot();
+    if (!saved) {
+      return res.status(404).json({ error: "No saved workspace found." });
+    }
+
+    const session = createSession();
+    session.sourceFilename = saved.sourceFilename;
+    session.sourceBlocks = cloneBlocks(saved.sourceBlocks);
+    session.workingBlocks = cloneBlocks(saved.workingBlocks);
+    session.blockBindings = { ...saved.blockBindings };
+    session.sourceDocxBuffer = cloneBuffer(saved.sourceDocxBuffer);
+    session.workingDocxBuffer = cloneBuffer(saved.workingDocxBuffer);
+    session.contextFiles = saved.contextFiles.map((item) => ({
+      id: uuidv4(),
+      filename: item.filename,
+      text: item.text
+    }));
+    session.proposalHistory = [];
+    updateSession(session);
+
+    return res.json({
+      id: session.id,
+      createdAt: session.createdAt,
+      restored: true,
+      savedAt: saved.savedAt
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to restore saved workspace."
+    });
+  }
+});
+
+app.delete("/api/session/saved-workspace", async (_req, res) => {
+  try {
+    const result = await clearSavedWorkspaceSnapshot();
+    return res.json({
+      ok: true,
+      removed: result.removed
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to remove saved workspace."
+    });
+  }
+});
+
 app.delete("/api/session/:id", (req, res) => {
   const removed = deleteSession(readRouteParam(req.params.id));
   if (!removed) {
@@ -373,6 +426,26 @@ app.post("/api/session/:id/upload-source", upload.single("file"), async (req, re
   }
 });
 
+app.delete("/api/session/:id/source", (req, res) => {
+  const session = getSession(readRouteParam(req.params.id));
+  if (!session) {
+    return res.status(404).json({ error: "Session not found." });
+  }
+
+  session.sourceFilename = undefined;
+  session.sourceBlocks = [];
+  session.workingBlocks = [];
+  session.blockBindings = {};
+  session.sourceDocxBuffer = undefined;
+  session.workingDocxBuffer = undefined;
+  session.proposalHistory = [];
+  updateSession(session);
+
+  return res.json({
+    ok: true
+  });
+});
+
 app.post("/api/session/:id/upload-context", upload.single("file"), async (req, res) => {
   try {
     const session = getSession(readRouteParam(req.params.id));
@@ -410,6 +483,26 @@ app.post("/api/session/:id/upload-context", upload.single("file"), async (req, r
       error: error instanceof Error ? error.message : "Failed to upload context file."
     });
   }
+});
+
+app.delete("/api/session/:id/context/:contextId", (req, res) => {
+  const session = getSession(readRouteParam(req.params.id));
+  if (!session) {
+    return res.status(404).json({ error: "Session not found." });
+  }
+
+  const contextId = readRouteParam(req.params.contextId);
+  const existingIndex = session.contextFiles.findIndex((item) => item.id === contextId);
+  if (existingIndex < 0) {
+    return res.status(404).json({ error: "Context file not found." });
+  }
+
+  session.contextFiles.splice(existingIndex, 1);
+  updateSession(session);
+  return res.json({
+    ok: true,
+    contextCount: session.contextFiles.length
+  });
 });
 
 app.get("/api/session/:id/state", (req, res) => {
@@ -706,6 +799,28 @@ app.post("/api/session/:id/promote-working", (req, res) => {
 
     return res.status(500).json({
       error: error instanceof Error ? error.message : "Failed to promote working copy."
+    });
+  }
+});
+
+app.post("/api/session/:id/save-workspace", async (req, res) => {
+  try {
+    const session = getSession(readRouteParam(req.params.id));
+    if (!session) {
+      return res.status(404).json({ error: "Session not found." });
+    }
+    if (!session.workingDocxBuffer || !session.workingBlocks.length) {
+      return res.status(400).json({ error: "Nothing to save. Upload and edit a source document first." });
+    }
+
+    const result = await saveWorkspaceSnapshot(session);
+    return res.json({
+      ok: true,
+      savedAt: result.savedAt
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to save workspace."
     });
   }
 });

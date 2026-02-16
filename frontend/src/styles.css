@@ -197,6 +197,32 @@ label input,
   border-color: #674138;
 }
 
+.session-save-btn {
+  background: #3f6f44;
+  border-color: #355f3a;
+}
+
+.session-remove-saved-btn {
+  background: #6a5a36;
+  border-color: #5a4c2e;
+}
+
+.danger-btn {
+  background: #8e3f2d;
+  border-color: #733224;
+}
+
+.context-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.context-remove-btn {
+  padding: 6px 9px;
+}
+
 .api-key-panel {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -289,6 +315,13 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+}
+
+.panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
 }
 

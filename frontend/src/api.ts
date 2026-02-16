@@ -34,6 +34,19 @@ export async function createSession(): Promise<{ id: string; createdAt: string }
   return parseJson(response);
 }
 
+export async function restoreSavedSession(): Promise<
+  | { id: string; createdAt: string; restored: true; savedAt: string }
+  | null
+> {
+  const response = await fetch(`${API_BASE}/api/session/restore-saved`, {
+    method: "POST"
+  });
+  if (response.status === 404) {
+    return null;
+  }
+  return parseJson(response);
+}
+
 export async function fetchState(sessionId: string): Promise<SessionState> {
   const response = await fetch(`${API_BASE}/api/session/${sessionId}/state`);
   return parseJson(response);
@@ -49,12 +62,26 @@ export async function uploadSource(sessionId: string, file: File): Promise<void>
   await parseJson(response);
 }
 
+export async function removeSource(sessionId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/session/${sessionId}/source`, {
+    method: "DELETE"
+  });
+  await parseJson(response);
+}
+
 export async function uploadContext(sessionId: string, file: File): Promise<void> {
   const form = new FormData();
   form.append("file", file);
   const response = await fetch(`${API_BASE}/api/session/${sessionId}/upload-context`, {
     method: "POST",
     body: form
+  });
+  await parseJson(response);
+}
+
+export async function removeContext(sessionId: string, contextId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/session/${sessionId}/context/${contextId}`, {
+    method: "DELETE"
   });
   await parseJson(response);
 }
@@ -139,6 +166,20 @@ export async function promoteWorking(sessionId: string): Promise<void> {
     body: JSON.stringify({ confirm: true })
   });
   await parseJson(response);
+}
+
+export async function saveWorkspace(sessionId: string): Promise<{ savedAt: string }> {
+  const response = await fetch(`${API_BASE}/api/session/${sessionId}/save-workspace`, {
+    method: "POST"
+  });
+  return parseJson(response);
+}
+
+export async function removeSavedWorkspace(): Promise<{ removed: boolean }> {
+  const response = await fetch(`${API_BASE}/api/session/saved-workspace`, {
+    method: "DELETE"
+  });
+  return parseJson(response);
 }
 
 export async function acceptAllEdits(sessionId: string): Promise<{ acceptedCount: number }> {

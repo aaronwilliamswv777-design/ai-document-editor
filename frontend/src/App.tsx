@@ -11,6 +11,11 @@ import {
   Provider,
   promoteWorking,
   proposeEdits,
+  removeContext,
+  removeSavedWorkspace,
+  removeSource,
+  restoreSavedSession,
+  saveWorkspace,
   uploadContext,
   uploadSource,
   workingDownloadUrl
@@ -275,7 +280,7 @@ function applyGrammarHighlights(container: HTMLElement, highlights: GrammarHighl
 }
 
 function App() {
-  const uiRevision = "model-picker-v5";
+  const uiRevision = "model-picker-v8";
   const [sessionId, setSessionId] = useState<string>("");
   const [state, setState] = useState<SessionState | null>(null);
   const [instructionText, setInstructionText] = useState("");
@@ -371,6 +376,14 @@ function App() {
     async function init() {
       try {
         setLoading(true);
+        const restored = await restoreSavedSession();
+        if (restored) {
+          setSessionId(restored.id);
+          await refresh(restored.id);
+          setStatus(`Restored saved workspace from ${formatDate(restored.savedAt)}.`);
+          return;
+        }
+
         const session = await createSession();
         setSessionId(session.id);
         await refresh(session.id);
@@ -590,6 +603,92 @@ function App() {
       setStatus("Working copy promoted to source baseline.");
     } catch (promoteError) {
       setError(promoteError instanceof Error ? promoteError.message : "Failed to promote working copy.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onSaveWorkspaceForReturn(): Promise<void> {
+    if (!sessionId || !state?.workingBlocks.length) {
+      return;
+    }
+    try {
+      setLoading(true);
+      setError("");
+      const result = await saveWorkspace(sessionId);
+      setStatus(`Saved current working document for next return (${formatDate(result.savedAt)}).`);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Failed to save workspace.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onRemoveSavedWorkspaceForReturn(): Promise<void> {
+    const confirmed = window.confirm(
+      "Remove the saved workspace for next return? Your current in-memory session will stay open."
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError("");
+      const result = await removeSavedWorkspace();
+      setStatus(
+        result.removed
+          ? "Removed saved workspace for next return."
+          : "No saved workspace was found to remove."
+      );
+    } catch (removeError) {
+      setError(
+        removeError instanceof Error ? removeError.message : "Failed to remove saved workspace."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onRemoveSourceDocument(): Promise<void> {
+    if (!sessionId) {
+      return;
+    }
+    const confirmed = window.confirm(
+      "Remove the current source and working document from this session? Context files will stay."
+    );
+    if (!confirmed) {
+      return;
+    }
+    try {
+      setLoading(true);
+      setError("");
+      await removeSource(sessionId);
+      await refresh(sessionId);
+      setStatus("Removed source/working document. Upload another `.docx` to continue.");
+    } catch (removeError) {
+      setError(
+        removeError instanceof Error ? removeError.message : "Failed to remove source document."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onRemoveContextFile(contextId: string): Promise<void> {
+    if (!sessionId) {
+      return;
+    }
+    try {
+      setLoading(true);
+      setError("");
+      await removeContext(sessionId, contextId);
+      await refresh(sessionId);
+      setStatus("Removed context file.");
+    } catch (removeError) {
+      setError(
+        removeError instanceof Error ? removeError.message : "Failed to remove context file."
+      );
     } finally {
       setLoading(false);
     }
@@ -987,7 +1086,35 @@ function App() {
 
       <main className="workspace">
         <section className="panel">
-          <h2>Current Working Document</h2>
+          <div className="panel-title-row">
+            <h2>Current Working Document</h2>
+            <div className="panel-actions">
+              <button
+                type="button"
+                className="session-save-btn"
+                onClick={onSaveWorkspaceForReturn}
+                disabled={loading || !state?.workingBlocks.length}
+              >
+                Save Working For Next Return
+              </button>
+              <button
+                type="button"
+                className="session-remove-saved-btn"
+                onClick={onRemoveSavedWorkspaceForReturn}
+                disabled={loading}
+              >
+                Remove Saved For Next Return
+              </button>
+              <button
+                type="button"
+                className="danger-btn"
+                onClick={onRemoveSourceDocument}
+                disabled={loading || !state?.workingBlocks.length}
+              >
+                Remove Current Document
+              </button>
+            </div>
+          </div>
           {state?.sourceFilename && <p className="subtle">Source file: {state.sourceFilename}</p>}
           {!state?.workingBlocks.length && (
             <p className="empty">Upload a `.docx` source document to start editing.</p>
@@ -1001,9 +1128,19 @@ function App() {
             <div className="context-list">
               <h3>Context Files</h3>
               {state.contextFiles.map((file) => (
-                <p key={file.id}>
-                  {file.filename} ({file.charCount.toLocaleString()} chars)
-                </p>
+                <div key={file.id} className="context-row">
+                  <p>
+                    {file.filename} ({file.charCount.toLocaleString()} chars)
+                  </p>
+                  <button
+                    type="button"
+                    className="danger-btn context-remove-btn"
+                    onClick={() => onRemoveContextFile(file.id)}
+                    disabled={loading}
+                  >
+                    Remove
+                  </button>
+                </div>
               ))}
             </div>
           )}
