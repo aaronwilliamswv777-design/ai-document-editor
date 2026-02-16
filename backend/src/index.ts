@@ -4,6 +4,7 @@ import express from "express";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
+import { diffChars, diffWords } from "diff";
 import { createSession, deleteSession, getSession, updateSession } from "./sessionStore.js";
 import {
   applyEditsToDocxBuffer,
@@ -27,6 +28,12 @@ app.use(express.json({ limit: "1mb" }));
 
 const proposeSchema = z.object({
   prompt: z.string().min(3),
+  provider: z.enum(["anthropic", "gemini", "openrouter", "mock"]).optional(),
+  model: z.string().optional()
+});
+
+const grammarAnalyzeSchema = z.object({
+  customInstructions: z.string().max(4000).optional(),
   provider: z.enum(["anthropic", "gemini", "openrouter", "mock"]).optional(),
   model: z.string().optional()
 });
@@ -69,6 +76,215 @@ function trimContext(text: string): string {
     return text;
   }
   return `${text.slice(0, 20_000)}\n\n[Truncated for token safety]`;
+}
+
+function buildGrammarPrompt(customInstructions: string | undefined, allowSentenceLevelChanges: boolean): string {
+  const base = [
+    "Analyze this document for grammar and punctuation issues only.",
+    "Do not make stylistic rewrites or alter meaning."
+  ].join("\n");
+
+  const strictConstraints = allowSentenceLevelChanges
+    ? "Apply only the sentence-level edits explicitly requested by the user."
+    : [
+        "Never delete or rewrite full sentences.",
+        "Keep sentence structure and meaning intact.",
+        "Only make local word-level or punctuation-level fixes."
+      ].join("\n");
+
+  if (!customInstructions?.trim()) {
+    return `${base}\n${strictConstraints}`;
+  }
+
+  return `${base}\n${strictConstraints}\n\nAdditional instructions:\n${customInstructions.trim()}`;
+}
+
+function countSentenceMarkers(text: string): number {
+  const matches = text.match(/[.!?](?=\s|$)/g);
+  return matches ? matches.length : 0;
+}
+
+function countWordTokens(text: string): number {
+  const matches = text.match(/[A-Za-z0-9']+/g);
+  return matches ? matches.length : 0;
+}
+
+function allowsSentenceLevelChanges(customInstructions?: string): boolean {
+  if (!customInstructions?.trim()) {
+    return false;
+  }
+  return /\b(delete|remove|rewrite|reword|shorten|condense|summari[sz]e|merge|split|replace sentence|drop sentence)\b/i.test(
+    customInstructions
+  );
+}
+
+function isGrammarSafeEdit(
+  originalText: string,
+  proposedText: string,
+  allowSentenceLevelChanges: boolean
+): boolean {
+  const original = originalText.trim();
+  const proposed = proposedText.trim();
+
+  if (!original || !proposed || original === proposed) {
+    return false;
+  }
+  if (allowSentenceLevelChanges) {
+    return true;
+  }
+
+  const originalSentenceCount = countSentenceMarkers(original);
+  const proposedSentenceCount = countSentenceMarkers(proposed);
+  if (proposedSentenceCount < originalSentenceCount) {
+    return false;
+  }
+
+  const originalWordCount = countWordTokens(original);
+  const proposedWordCount = countWordTokens(proposed);
+  if (originalWordCount >= 10 && proposedWordCount < Math.floor(originalWordCount * 0.75)) {
+    return false;
+  }
+
+  const parts = diffWords(original, proposed);
+  let removedWordCount = 0;
+  let unchangedWordCount = 0;
+  let maxRemovedRun = 0;
+  let currentRemovedRun = 0;
+
+  for (const part of parts) {
+    const tokens = countWordTokens(part.value);
+    if (part.removed) {
+      removedWordCount += tokens;
+      currentRemovedRun += tokens;
+      if (currentRemovedRun > maxRemovedRun) {
+        maxRemovedRun = currentRemovedRun;
+      }
+    } else if (part.added) {
+      currentRemovedRun = 0;
+    } else {
+      unchangedWordCount += tokens;
+      currentRemovedRun = 0;
+    }
+  }
+
+  if (originalWordCount >= 8 && unchangedWordCount <= 1) {
+    return false;
+  }
+  if (removedWordCount > Math.max(6, Math.floor(originalWordCount * 0.35))) {
+    return false;
+  }
+  if (maxRemovedRun >= 8) {
+    return false;
+  }
+
+  return true;
+}
+
+function normalizeSnippet(value: string): string {
+  return value
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractAtomicTokens(value: string): string[] {
+  const matches = value.match(/[A-Za-z0-9']+|[.,;:!?]/g);
+  if (!matches) {
+    return [];
+  }
+  return matches.map((token) => token.trim()).filter(Boolean);
+}
+
+function deriveHighlightTexts(originalText: string, proposedText: string): string[] {
+  const snippets: string[] = [];
+  const seen = new Set<string>();
+
+  const pushSnippet = (value: string): void => {
+    const normalized = normalizeSnippet(value).slice(0, 40);
+    if (!normalized) {
+      return;
+    }
+    const dedupeKey = normalized.toLowerCase();
+    if (seen.has(dedupeKey)) {
+      return;
+    }
+    seen.add(dedupeKey);
+    snippets.push(normalized);
+  };
+
+  const wordParts = diffWords(originalText, proposedText);
+  for (const part of wordParts) {
+    if (part.removed) {
+      for (const token of extractAtomicTokens(part.value)) {
+        pushSnippet(token);
+      }
+    }
+  }
+
+  if (snippets.length === 0) {
+    for (const part of wordParts) {
+      if (part.added) {
+        for (const token of extractAtomicTokens(part.value)) {
+          pushSnippet(token);
+        }
+      }
+    }
+  }
+
+  if (snippets.length === 0) {
+    const charParts = diffChars(originalText, proposedText);
+    for (const part of charParts) {
+      if (part.removed || part.added) {
+        for (const token of extractAtomicTokens(part.value)) {
+          pushSnippet(token);
+        }
+      }
+    }
+  }
+
+  if (snippets.length === 0) {
+    const fallback = extractAtomicTokens(originalText)[0];
+    if (fallback) {
+      pushSnippet(fallback);
+    }
+  }
+
+  return snippets.slice(0, 12);
+}
+
+async function acceptPendingEditsForSession(session: NonNullable<ReturnType<typeof getSession>>): Promise<number> {
+  const pendingEdits = session.proposalHistory.flatMap((batch) =>
+    batch.edits.filter((edit) => edit.status === "pending")
+  );
+
+  if (pendingEdits.length === 0) {
+    return 0;
+  }
+
+  if (!session.workingDocxBuffer) {
+    throw new Error("Working document buffer is missing.");
+  }
+
+  const updates: Array<{ blockId: string; text: string }> = [];
+  for (const edit of pendingEdits) {
+    edit.status = "accepted";
+    const block = session.workingBlocks.find((item) => item.id === edit.blockId);
+    if (block) {
+      block.text = edit.proposedText;
+    }
+    updates.push({
+      blockId: edit.blockId,
+      text: edit.proposedText
+    });
+  }
+
+  session.workingDocxBuffer = await applyEditsToDocxBuffer({
+    buffer: session.workingDocxBuffer,
+    updates,
+    bindings: session.blockBindings
+  });
+
+  return pendingEdits.length;
 }
 
 app.get("/api/health", (_req, res) => {
@@ -234,6 +450,7 @@ app.post("/api/session/:id/propose-edits", async (req, res) => {
 
     const batch: ProposalBatch = {
       id: uuidv4(),
+      mode: "custom",
       prompt: payload.prompt,
       createdAt: new Date().toISOString(),
       provider: modelResponse.provider,
@@ -266,6 +483,80 @@ app.post("/api/session/:id/propose-edits", async (req, res) => {
 
     return res.status(500).json({
       error: error instanceof Error ? error.message : "Failed to generate proposals."
+    });
+  }
+});
+
+app.post("/api/session/:id/analyze-grammar", async (req, res) => {
+  try {
+    const session = getSession(readRouteParam(req.params.id));
+    if (!session) {
+      return res.status(404).json({ error: "Session not found." });
+    }
+    if (session.workingBlocks.length === 0) {
+      return res.status(400).json({ error: "Upload a source document first." });
+    }
+
+    const payload = grammarAnalyzeSchema.parse(req.body);
+    const contextText = trimContext(
+      session.contextFiles.map((item) => `[${item.filename}]\n${item.text}`).join("\n\n")
+    );
+
+    const allowSentenceLevelChanges = allowsSentenceLevelChanges(payload.customInstructions);
+    const grammarPrompt = buildGrammarPrompt(payload.customInstructions, allowSentenceLevelChanges);
+    const modelResponse = await generateEdits({
+      prompt: grammarPrompt,
+      contextText,
+      blocks: session.workingBlocks,
+      provider: payload.provider || "mock",
+      model: payload.model
+    });
+
+    const blockMap = new Map(session.workingBlocks.map((block) => [block.id, block]));
+    const safeEdits = modelResponse.edits.filter((edit) => {
+      const originalText = blockMap.get(edit.blockId)?.text || "";
+      return isGrammarSafeEdit(originalText, edit.proposedText, allowSentenceLevelChanges);
+    });
+
+    const batch: ProposalBatch = {
+      id: uuidv4(),
+      mode: "grammar",
+      prompt: payload.customInstructions?.trim()
+        ? `Grammar + punctuation analysis (${payload.customInstructions.trim()})`
+        : "Grammar + punctuation analysis",
+      createdAt: new Date().toISOString(),
+      provider: modelResponse.provider,
+      model: modelResponse.model,
+      edits: safeEdits.map((edit) => {
+        const originalText = blockMap.get(edit.blockId)?.text || "";
+        const highlightTexts = deriveHighlightTexts(originalText, edit.proposedText);
+        return {
+          id: uuidv4(),
+          blockId: edit.blockId,
+          originalText,
+          proposedText: edit.proposedText,
+          rationale: edit.rationale,
+          highlightText: highlightTexts[0],
+          highlightTexts,
+          status: "pending",
+          diffHtml: buildDiffHtml(originalText, edit.proposedText)
+        };
+      })
+    };
+
+    session.proposalHistory.push(batch);
+    updateSession(session);
+
+    return res.status(201).json(batch);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: "Invalid request body.",
+        issues: error.issues
+      });
+    }
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to analyze grammar."
     });
   }
 });
@@ -339,6 +630,25 @@ app.post("/api/session/:id/edits/:editId/decision", async (req, res) => {
 
     return res.status(500).json({
       error: error instanceof Error ? error.message : "Failed to update edit decision."
+    });
+  }
+});
+
+app.post("/api/session/:id/edits/accept-all", async (req, res) => {
+  try {
+    const session = getSession(readRouteParam(req.params.id));
+    if (!session) {
+      return res.status(404).json({ error: "Session not found." });
+    }
+
+    const acceptedCount = await acceptPendingEditsForSession(session);
+    updateSession(session);
+    return res.json({
+      acceptedCount
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to accept all pending edits."
     });
   }
 });

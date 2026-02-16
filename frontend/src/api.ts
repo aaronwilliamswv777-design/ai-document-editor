@@ -4,14 +4,21 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
 
 async function parseJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    let detail = "Request failed";
+    let detail = `Request failed (${response.status})`;
     try {
       const body = (await response.json()) as { error?: string };
       if (body.error) {
         detail = body.error;
       }
     } catch {
-      // Keep default message.
+      try {
+        const raw = await response.text();
+        if (raw.includes("Cannot POST")) {
+          detail = "Endpoint is unavailable. Restart the backend container and retry.";
+        }
+      } catch {
+        // Keep default message.
+      }
     }
     throw new Error(detail);
   }
@@ -64,6 +71,24 @@ export async function proposeEdits(
   return parseJson(response);
 }
 
+export async function analyzeGrammar(
+  sessionId: string,
+  payload: {
+    customInstructions?: string;
+    provider: "anthropic" | "gemini" | "openrouter" | "mock";
+    model?: string;
+  }
+): Promise<ProposalBatch> {
+  const response = await fetch(`${API_BASE}/api/session/${sessionId}/analyze-grammar`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  return parseJson(response);
+}
+
 export async function decideEdit(
   sessionId: string,
   editId: string,
@@ -88,6 +113,13 @@ export async function promoteWorking(sessionId: string): Promise<void> {
     body: JSON.stringify({ confirm: true })
   });
   await parseJson(response);
+}
+
+export async function acceptAllEdits(sessionId: string): Promise<{ acceptedCount: number }> {
+  const response = await fetch(`${API_BASE}/api/session/${sessionId}/edits/accept-all`, {
+    method: "POST"
+  });
+  return parseJson(response);
 }
 
 export function workingDownloadUrl(sessionId: string): string {

@@ -1,6 +1,8 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { renderAsync } from "docx-preview";
 import {
+  acceptAllEdits,
+  analyzeGrammar,
   createSession,
   decideEdit,
   fetchPreviewDoc,
@@ -14,15 +16,255 @@ import {
 import { ProposalBatch, SessionState } from "./types";
 
 type Provider = "anthropic" | "gemini" | "openrouter" | "mock";
+type EditMode = "custom" | "grammar";
+
+type GrammarHighlight = {
+  blockId: string;
+  blockText: string;
+  targetText: string;
+  tooltip: string;
+  hintIndex: number;
+};
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString();
 }
 
+function isInsideExistingGrammarHighlight(node: Node): boolean {
+  let current: Node | null = node.parentNode;
+  while (current) {
+    if (current.nodeType === Node.ELEMENT_NODE) {
+      const element = current as Element;
+      if (
+        element.classList.contains("grammar-issue-highlight") ||
+        element.classList.contains("grammar-issue-highlight-whole")
+      ) {
+        return true;
+      }
+    }
+    current = current.parentNode;
+  }
+  return false;
+}
+
+function collectTextNodes(element: Element): Text[] {
+  const nodes: Text[] = [];
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  let current: Node | null = walker.nextNode();
+  while (current) {
+    if (!isInsideExistingGrammarHighlight(current)) {
+      nodes.push(current as Text);
+    }
+    current = walker.nextNode();
+  }
+  return nodes;
+}
+
+function normalizeSearchText(value: string): string {
+  return value
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function extractAtomicHighlightTargets(value: string): string[] {
+  const matches = value.match(/[A-Za-z0-9']+|[.,;:!?]/g);
+  if (!matches) {
+    return [];
+  }
+  return matches.map((item) => item.trim()).filter(Boolean);
+}
+
+function isWordToken(value: string): boolean {
+  return /^[A-Za-z0-9']+$/.test(value);
+}
+
+function isWordChar(value: string): boolean {
+  return /[A-Za-z0-9']/.test(value);
+}
+
+function findNeedleStart(fullText: string, needle: string): number {
+  const loweredText = fullText.toLowerCase();
+  const loweredNeedle = needle.toLowerCase();
+  let cursor = 0;
+
+  while (cursor <= loweredText.length - loweredNeedle.length) {
+    const index = loweredText.indexOf(loweredNeedle, cursor);
+    if (index < 0) {
+      return -1;
+    }
+
+    if (!isWordToken(needle)) {
+      return index;
+    }
+
+    const prev = index > 0 ? fullText[index - 1] : "";
+    const next = index + needle.length < fullText.length ? fullText[index + needle.length] : "";
+    const boundaryOk = (!prev || !isWordChar(prev)) && (!next || !isWordChar(next));
+    if (boundaryOk) {
+      return index;
+    }
+    cursor = index + 1;
+  }
+
+  return -1;
+}
+
+function splitIntoSentences(text: string): string[] {
+  const normalized = text
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const matches = normalized.match(/[^.!?]+[.!?]?/g) || [];
+  const sentences = matches.map((item) => item.trim()).filter(Boolean);
+  return sentences.length > 0 ? sentences : [normalized];
+}
+
+function buildSentenceScopedSuggestion(proposedText: string, targetText: string): string {
+  const sentences = splitIntoSentences(proposedText);
+  if (sentences.length === 0) {
+    return proposedText.trim();
+  }
+
+  const normalizedTarget = normalizeSearchText(targetText);
+  if (normalizedTarget) {
+    const directMatch = sentences.find((sentence) =>
+      normalizeSearchText(sentence).includes(normalizedTarget)
+    );
+    if (directMatch) {
+      return directMatch;
+    }
+
+    const targetTokens = normalizedTarget.split(/\s+/).filter(Boolean);
+    for (const token of targetTokens) {
+      if (token.length < 2) {
+        continue;
+      }
+      const tokenMatch = sentences.find((sentence) =>
+        normalizeSearchText(sentence).includes(token)
+      );
+      if (tokenMatch) {
+        return tokenMatch;
+      }
+    }
+  }
+
+  return sentences[0];
+}
+
+function applyHighlightToParagraph(paragraph: Element, targetText: string, tooltip: string): boolean {
+  const needle = targetText.trim();
+  if (!needle) {
+    return false;
+  }
+
+  const textNodes = collectTextNodes(paragraph).filter((node) => (node.nodeValue || "").length > 0);
+  if (textNodes.length === 0) {
+    return false;
+  }
+
+  const fullText = textNodes.map((node) => node.nodeValue || "").join("");
+  const start = findNeedleStart(fullText, needle);
+  if (start < 0) {
+    return false;
+  }
+  const end = start + needle.length;
+
+  let cursor = 0;
+  let startNode: Text | null = null;
+  let endNode: Text | null = null;
+  let startOffset = 0;
+  let endOffset = 0;
+
+  for (const node of textNodes) {
+    const value = node.nodeValue || "";
+    const nextCursor = cursor + value.length;
+
+    if (!startNode && start >= cursor && start <= nextCursor) {
+      startNode = node;
+      startOffset = Math.max(0, start - cursor);
+    }
+    if (!endNode && end >= cursor && end <= nextCursor) {
+      endNode = node;
+      endOffset = Math.max(0, end - cursor);
+    }
+
+    cursor = nextCursor;
+    if (startNode && endNode) {
+      break;
+    }
+  }
+
+  if (!startNode || !endNode) {
+    return false;
+  }
+
+  const range = document.createRange();
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode, endOffset);
+
+  const marker = document.createElement("span");
+  marker.className = "grammar-issue-highlight";
+  marker.setAttribute("data-grammar-tooltip", tooltip);
+  marker.setAttribute("aria-label", tooltip);
+
+  try {
+    range.surroundContents(marker);
+  } catch {
+    const extracted = range.extractContents();
+    marker.appendChild(extracted);
+    range.insertNode(marker);
+  }
+
+  return true;
+}
+
+function applyGrammarHighlights(container: HTMLElement, highlights: GrammarHighlight[]): void {
+  if (highlights.length === 0) {
+    return;
+  }
+
+  const paragraphs = Array.from(container.querySelectorAll(".docx p, .docx li, .docx td, .docx th"));
+  const candidateParagraphs = paragraphs.length
+    ? paragraphs
+    : Array.from(container.querySelectorAll(".docx *")).filter(
+        (element) => normalizeSearchText(element.textContent || "").length > 0
+      );
+
+  for (const highlight of highlights) {
+    let paragraph: Element | undefined;
+    const normalizedBlock = normalizeSearchText(highlight.blockText);
+    if (normalizedBlock) {
+      paragraph = candidateParagraphs.find((item) =>
+        normalizeSearchText(item.textContent || "").includes(normalizedBlock.slice(0, 120))
+      );
+    }
+    if (!paragraph) {
+      paragraph = candidateParagraphs[highlight.hintIndex];
+    }
+    if (!paragraph) {
+      paragraph = candidateParagraphs.find((item) =>
+        normalizeSearchText(item.textContent || "").includes(normalizeSearchText(highlight.targetText))
+      );
+    }
+    if (!paragraph) {
+      continue;
+    }
+
+    applyHighlightToParagraph(paragraph, highlight.targetText, highlight.tooltip);
+  }
+}
+
 function App() {
   const [sessionId, setSessionId] = useState<string>("");
   const [state, setState] = useState<SessionState | null>(null);
-  const [prompt, setPrompt] = useState("");
+  const [instructionText, setInstructionText] = useState("");
+  const [editMode, setEditMode] = useState<EditMode>("custom");
   const [provider, setProvider] = useState<Provider>("mock");
   const [model, setModel] = useState("");
   const [loading, setLoading] = useState(false);
@@ -102,24 +344,39 @@ function App() {
     }
   }
 
-  async function onPropose(): Promise<void> {
-    if (!sessionId || !prompt.trim()) {
+  async function onRunModeAction(): Promise<void> {
+    if (!sessionId || !state?.workingBlocks.length) {
+      return;
+    }
+    if (editMode === "custom" && !instructionText.trim()) {
       return;
     }
 
     try {
       setLoading(true);
       setError("");
-      const payload = {
-        prompt: prompt.trim(),
-        provider,
-        ...(model.trim() ? { model: model.trim() } : {})
-      };
-      const result = await proposeEdits(sessionId, payload);
-      await refresh(sessionId);
-      setStatus(`Generated ${result.edits.length} proposal(s) via ${result.provider}.`);
-    } catch (proposeError) {
-      setError(proposeError instanceof Error ? proposeError.message : "Failed to generate edits.");
+
+      if (editMode === "grammar") {
+        const result = await analyzeGrammar(sessionId, {
+          customInstructions: instructionText.trim() || undefined,
+          provider,
+          ...(model.trim() ? { model: model.trim() } : {})
+        });
+        await refresh(sessionId);
+        setStatus(
+          `Detected ${result.edits.length} grammar/punctuation issue(s) via ${result.provider}.`
+        );
+      } else {
+        const result = await proposeEdits(sessionId, {
+          prompt: instructionText.trim(),
+          provider,
+          ...(model.trim() ? { model: model.trim() } : {})
+        });
+        await refresh(sessionId);
+        setStatus(`Generated ${result.edits.length} proposal(s) via ${result.provider}.`);
+      }
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Failed to run analysis.");
     } finally {
       setLoading(false);
     }
@@ -137,6 +394,23 @@ function App() {
       setStatus(`Edit ${decision}ed.`);
     } catch (decisionError) {
       setError(decisionError instanceof Error ? decisionError.message : "Failed to apply decision.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function onAcceptAllPending(): Promise<void> {
+    if (!sessionId) {
+      return;
+    }
+    try {
+      setLoading(true);
+      setError("");
+      const result = await acceptAllEdits(sessionId);
+      await refresh(sessionId);
+      setStatus(`Accepted ${result.acceptedCount} pending edit(s).`);
+    } catch (acceptError) {
+      setError(acceptError instanceof Error ? acceptError.message : "Failed to accept all edits.");
     } finally {
       setLoading(false);
     }
@@ -182,6 +456,68 @@ function App() {
       .filter((edit) => edit.status === "pending").length;
   }, [state]);
 
+  const grammarHighlights = useMemo(() => {
+    if (!state) {
+      return [] as GrammarHighlight[];
+    }
+
+    const blockMap = new Map(state.workingBlocks.map((block) => [block.id, block]));
+    const blockIndexById = new Map(state.workingBlocks.map((block, index) => [block.id, index]));
+    const highlights: GrammarHighlight[] = [];
+    const seen = new Set<string>();
+
+    for (const batch of state.proposalHistory) {
+      if (batch.mode !== "grammar") {
+        continue;
+      }
+      for (const edit of batch.edits) {
+        if (edit.status !== "pending") {
+          continue;
+        }
+        const block = blockMap.get(edit.blockId);
+        if (!block) {
+          continue;
+        }
+        const rawTargetTexts = edit.highlightTexts?.length
+          ? edit.highlightTexts
+          : [edit.highlightText || edit.originalText];
+
+        const targetTexts = Array.from(
+          new Set(
+            rawTargetTexts
+              .flatMap((value) => extractAtomicHighlightTargets(value))
+              .map((value) => value.trim())
+              .filter(Boolean)
+          )
+        ).slice(0, 12);
+
+        if (targetTexts.length === 0) {
+          continue;
+        }
+
+        for (const targetText of targetTexts) {
+          const key = `${edit.blockId}:${targetText.toLowerCase()}`;
+          if (seen.has(key)) {
+            continue;
+          }
+          seen.add(key);
+          highlights.push({
+            blockId: edit.blockId,
+            blockText: block.text,
+            targetText,
+            tooltip: `Reason\n${edit.rationale}\n\nSuggested change\n${buildSentenceScopedSuggestion(
+              edit.proposedText,
+              targetText
+            )}`,
+            hintIndex: blockIndexById.get(edit.blockId) ?? 0
+          });
+        }
+      }
+    }
+
+    return highlights;
+  }, [state]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -205,6 +541,7 @@ function App() {
         }
         previewContainerRef.current.innerHTML = "";
         await renderAsync(fileBuffer, previewContainerRef.current);
+        applyGrammarHighlights(previewContainerRef.current, grammarHighlights);
       } catch (renderError) {
         if (!cancelled) {
           setPreviewError(
@@ -224,7 +561,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [sessionId, state]);
+  }, [sessionId, state, grammarHighlights]);
 
   return (
     <div className="app">
@@ -291,18 +628,52 @@ function App() {
           </button>
         </div>
 
+        <div className="mode-row">
+          <span className="mode-label">Mode</span>
+          <button
+            type="button"
+            className={`mode-button ${editMode === "custom" ? "mode-button-active" : ""}`}
+            onClick={() => setEditMode("custom")}
+            disabled={loading}
+          >
+            Targeted Edit
+          </button>
+          <button
+            type="button"
+            className={`mode-button ${editMode === "grammar" ? "mode-button-active" : ""}`}
+            onClick={() => setEditMode("grammar")}
+            disabled={loading}
+          >
+            Grammar & Punctuation
+          </button>
+        </div>
+
         <label className="prompt-field">
-          Edit instruction
+          {editMode === "custom"
+            ? "Edit instruction"
+            : "Custom instructions for grammar mode (optional)"}
           <textarea
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            placeholder="Example: tighten wording and fix punctuation for executive tone."
+            value={instructionText}
+            onChange={(event) => setInstructionText(event.target.value)}
+            placeholder={
+              editMode === "custom"
+                ? "Example: tighten wording and fix punctuation for executive tone."
+                : "Optional: focus on commas, tense consistency, and business formal grammar."
+            }
             rows={4}
             disabled={loading}
           />
         </label>
-        <button type="button" onClick={onPropose} disabled={loading || !state?.workingBlocks.length}>
-          Propose Edits
+        <button
+          type="button"
+          onClick={onRunModeAction}
+          disabled={
+            loading ||
+            !state?.workingBlocks.length ||
+            (editMode === "custom" && !instructionText.trim())
+          }
+        >
+          {editMode === "custom" ? "Propose Edits" : "Analyze Grammar & Punctuation"}
         </button>
         {error && <p className="error">{error}</p>}
       </section>
@@ -332,9 +703,14 @@ function App() {
         </section>
 
         <section className="panel">
-          <h2>Proposed Edits</h2>
+          <div className="panel-title-row">
+            <h2>Proposed Edits</h2>
+            <button type="button" onClick={onAcceptAllPending} disabled={loading || pendingCount === 0}>
+              Accept All Pending
+            </button>
+          </div>
           {!allBatches.length && (
-            <p className="empty">Run a prompt to generate edit proposals for review.</p>
+            <p className="empty">Run a prompt or grammar analysis to generate proposals for review.</p>
           )}
           <div className="proposal-list">
             {allBatches.map((batch) => (
@@ -343,9 +719,12 @@ function App() {
                   <p>
                     {formatDate(batch.createdAt)} | {batch.provider} | {batch.model}
                   </p>
-                  <p className="subtle">Prompt: {batch.prompt}</p>
+                  <p className="subtle">
+                    Mode: {batch.mode === "grammar" ? "Grammar & Punctuation" : "Targeted Edit"}
+                  </p>
+                  <p className="subtle">Instruction: {batch.prompt}</p>
                 </header>
-                {!batch.edits.length && <p className="empty">No changes were proposed for this prompt.</p>}
+                {!batch.edits.length && <p className="empty">No changes were proposed for this run.</p>}
                 {batch.edits.map((edit) => (
                   <div key={edit.id} className={`edit-card status-${edit.status}`}>
                     <div
@@ -354,6 +733,18 @@ function App() {
                         __html: edit.diffHtml
                       }}
                     />
+                    {batch.mode === "grammar" &&
+                      (edit.highlightTexts?.length || edit.highlightText) && (
+                        <p className="subtle">
+                          Detected issue text: "
+                          {(
+                            edit.highlightTexts?.length
+                              ? edit.highlightTexts.slice(0, 4).join('", "')
+                              : edit.highlightText || ""
+                          )}
+                          "
+                        </p>
+                      )}
                     <p className="rationale">{edit.rationale}</p>
                     <div className="actions">
                       <span className="badge">{edit.status}</span>

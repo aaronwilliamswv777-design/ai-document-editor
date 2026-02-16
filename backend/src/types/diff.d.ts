@@ -6,5 +6,5 @@ declare module "diff" {
   };
 
   export function diffWords(oldText: string, newText: string): Change[];
+  export function diffChars(oldText: string, newText: string): Change[];
 }
-

@@ -5,8 +5,12 @@ Dockerized web app for human-in-the-loop AI editing of Word documents (`.docx`):
 - Upload a source `.docx` (immutable source copy for safety).
 - Upload optional context files (`.docx`, `.txt`, `.md`).
 - Prompt AI for targeted edits.
+- Switch to Grammar & Punctuation mode and run document analysis.
+- Optional custom instructions in Grammar & Punctuation mode.
 - Review clear highlighted diffs per proposed edit.
+- See grammar/punctuation detections highlighted in red in the formatted preview with hover explanations.
 - Accept or reject each proposal individually.
+- Accept all pending proposals in one action.
 - Download the current working copy as a new `.docx`.
 - Optionally promote working copy to session source baseline with explicit confirmation.
 
@@ -67,6 +71,9 @@ docker compose up --build
 - `POST /api/session/:id/upload-context` (`multipart/form-data`, field `file`)
 - `GET /api/session/:id/state`
 - `POST /api/session/:id/propose-edits`
+- `POST /api/session/:id/analyze-grammar`
 - `POST /api/session/:id/edits/:editId/decision`
+- `POST /api/session/:id/edits/accept-all`
 - `POST /api/session/:id/promote-working`
 - `GET /api/session/:id/download?variant=working|source`
+- `GET /api/session/:id/preview?variant=working|source`

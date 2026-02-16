@@ -17,12 +17,15 @@ export type EditProposal = {
   originalText: string;
   proposedText: string;
   rationale: string;
+  highlightText?: string;
+  highlightTexts?: string[];
   status: EditStatus;
   diffHtml: string;
 };
 
 export type ProposalBatch = {
   id: string;
+  mode: "custom" | "grammar";
   prompt: string;
   createdAt: string;
   provider: "anthropic" | "gemini" | "openrouter" | "mock";
@@ -39,4 +42,3 @@ export type SessionState = {
   contextFiles: ContextSummary[];
   proposalHistory: ProposalBatch[];
 };
-

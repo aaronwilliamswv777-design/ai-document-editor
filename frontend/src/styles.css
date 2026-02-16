@@ -111,6 +111,28 @@ label input,
   font-weight: 600;
 }
 
+.mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mode-label {
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.mode-button {
+  background: #6f7778;
+  border-color: #5a6263;
+}
+
+.mode-button-active {
+  background: var(--accent);
+  border-color: var(--accent-strong);
+}
+
 button,
 .download-link {
   border: 1px solid var(--accent-strong);
@@ -165,6 +187,13 @@ button:disabled {
   font-size: 1.1rem;
 }
 
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .subtle {
   margin: 0;
   color: var(--muted);
@@ -207,6 +236,59 @@ button:disabled {
 
 .docx-host .docx-wrapper section.docx {
   box-shadow: 0 8px 20px rgba(31, 39, 40, 0.2);
+}
+
+.grammar-issue-highlight {
+  text-decoration: underline wavy #c81414;
+  text-decoration-thickness: 2px;
+  background: rgba(255, 67, 67, 0.12);
+  border-radius: 2px;
+  cursor: help;
+  position: relative;
+}
+
+.grammar-issue-highlight-whole {
+  box-shadow: inset 0 -2px 0 rgba(200, 20, 20, 0.7);
+  background: rgba(255, 67, 67, 0.08);
+  position: relative;
+  cursor: help;
+}
+
+.grammar-issue-highlight[data-grammar-tooltip]:hover::after,
+.grammar-issue-highlight-whole[data-grammar-tooltip]:hover::after {
+  content: attr(data-grammar-tooltip);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px);
+  max-width: 360px;
+  min-width: 220px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #152628;
+  color: #f3faf9;
+  box-shadow: 0 10px 24px rgba(12, 20, 21, 0.35);
+  border: 1px solid rgba(229, 242, 240, 0.22);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  z-index: 40;
+  pointer-events: none;
+}
+
+.grammar-issue-highlight[data-grammar-tooltip]:hover::before,
+.grammar-issue-highlight-whole[data-grammar-tooltip]:hover::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  bottom: calc(100% + 2px);
+  width: 12px;
+  height: 12px;
+  transform: rotate(45deg);
+  background: #152628;
+  border-right: 1px solid rgba(229, 242, 240, 0.22);
+  border-bottom: 1px solid rgba(229, 242, 240, 0.22);
+  z-index: 41;
+  pointer-events: none;
 }
 
 .doc-block {
