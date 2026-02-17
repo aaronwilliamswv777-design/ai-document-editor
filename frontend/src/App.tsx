@@ -1373,24 +1373,52 @@ function App() {
     }
 
     const container = previewContainerRef.current;
+    const openClassName = "grammar-inline-popover-open";
+    const closeOpenInlinePopovers = (keepOpen?: HTMLElement): void => {
+      const openAnchors = container.querySelectorAll<HTMLElement>(`.grammar-issue-anchor.${openClassName}`);
+      for (const anchor of openAnchors) {
+        if (keepOpen && anchor === keepOpen) {
+          continue;
+        }
+        anchor.classList.remove(openClassName);
+      }
+    };
     const onInlineActionClick = (event: MouseEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (!target) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
         return;
       }
       const actionButton = target.closest<HTMLButtonElement>(".inline-decision-btn");
-      if (!actionButton) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
+      if (actionButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeOpenInlinePopovers();
 
-      const editId = actionButton.dataset.editId;
-      const decision = actionButton.dataset.inlineDecision;
-      if (!editId || loading || (decision !== "accept" && decision !== "reject")) {
+        const editId = actionButton.dataset.editId;
+        const decision = actionButton.dataset.inlineDecision;
+        if (!editId || loading || (decision !== "accept" && decision !== "reject")) {
+          return;
+        }
+        void onDecide(editId, decision);
         return;
       }
-      void onDecide(editId, decision);
+
+      const clickedHighlight = target.closest<HTMLElement>(".grammar-issue-highlight");
+      const clickedAnchor = target.closest<HTMLElement>(".grammar-issue-anchor");
+      if (clickedHighlight && clickedAnchor) {
+        event.preventDefault();
+        event.stopPropagation();
+        const shouldOpen = !clickedAnchor.classList.contains(openClassName);
+        closeOpenInlinePopovers(clickedAnchor);
+        clickedAnchor.classList.toggle(openClassName, shouldOpen);
+        return;
+      }
+
+      if (target.closest(".grammar-inline-popover")) {
+        return;
+      }
+
+      closeOpenInlinePopovers();
     };
 
     container.addEventListener("click", onInlineActionClick);
@@ -1910,7 +1938,7 @@ function App() {
             <header className="document-stage-header">
               <h2>Current Working Document</h2>
               <p className="subtle">
-                Hover red highlights to review why each word changes. Accept or reject directly in
+                Click red highlights to review why each word changes. Accept or reject directly in
                 the document or from the sidebar suggestions list.
               </p>
             </header>

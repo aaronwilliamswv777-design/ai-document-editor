@@ -355,7 +355,7 @@ button:disabled {
   z-index: 40;
 }
 
-.grammar-issue-anchor:hover .grammar-inline-popover,
+.grammar-issue-anchor.grammar-inline-popover-open .grammar-inline-popover,
 .grammar-issue-anchor:focus-within .grammar-inline-popover {
   opacity: 1;
   pointer-events: auto;
