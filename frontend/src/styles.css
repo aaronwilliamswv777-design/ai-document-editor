@@ -58,6 +58,10 @@ body {
   gap: 10px;
 }
 
+.sidebar * {
+  -webkit-user-drag: none;
+}
+
 .sidebar-header h1 {
   margin: 0;
   font-size: 1.1rem;
@@ -92,6 +96,35 @@ body {
   box-shadow: 0 0 0 2px var(--accent-ghost);
 }
 
+.sidebar-drop-ghost {
+  height: 26px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 72%, #b5dbff 28%);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: color-mix(in srgb, var(--accent) 70%, var(--ink) 30%);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  margin: 2px 0;
+  animation: sidebar-drop-ghost-pulse 160ms ease-out;
+}
+
+@keyframes sidebar-drop-ghost-pulse {
+  from {
+    transform: scale(0.98);
+    opacity: 0.72;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
 .sidebar-section-summary {
   list-style: none;
   cursor: pointer;
@@ -117,6 +150,18 @@ body {
   border: 1px dashed var(--line);
   border-radius: 999px;
   padding: 2px 8px;
+}
+
+.drag-handle {
+  font: inherit;
+  background: transparent;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-drag: element;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
 }
 
 .sidebar-section-body {

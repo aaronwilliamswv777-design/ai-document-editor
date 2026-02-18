@@ -2,6 +2,8 @@ import {
   CSSProperties,
   ChangeEvent,
   DragEvent,
+  Fragment,
+  SyntheticEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -45,6 +47,11 @@ type SidebarSectionId =
   | "direct"
   | "ai"
   | "appearance";
+type SidebarDropPreview = {
+  targetId: SidebarSectionId;
+  placement: "before" | "after";
+};
+type SidebarSectionOpenState = Record<SidebarSectionId, boolean>;
 type ThemeSettings = {
   overallColor: string;
   mainUiColor: string;
@@ -61,6 +68,7 @@ const MODEL_CATALOG_STORAGE_KEY = "doc-edit.model-catalog.v1";
 const EDIT_MODE_STORAGE_KEY = "doc-edit.ui.edit-mode.v1";
 const TOP_MENU_STORAGE_KEY = "doc-edit.ui.top-menu.v1";
 const SIDEBAR_ORDER_STORAGE_KEY = "doc-edit.ui.sidebar-order.v1";
+const SIDEBAR_SECTION_OPEN_STORAGE_KEY = "doc-edit.ui.sidebar-section-open.v1";
 const THEME_STORAGE_KEY = "doc-edit.ui.theme.v1";
 const DEFAULT_THEME: ThemeSettings = {
   overallColor: "#090c12",
@@ -137,6 +145,44 @@ function sanitizeSidebarOrder(value: unknown): SidebarSectionId[] {
     }
   }
   return Array.from(unique);
+}
+
+function createDefaultSidebarSectionOpenState(): SidebarSectionOpenState {
+  return DEFAULT_SIDEBAR_ORDER.reduce((accumulator, sectionId) => {
+    accumulator[sectionId] = true;
+    return accumulator;
+  }, {} as SidebarSectionOpenState);
+}
+
+function sanitizeSidebarSectionOpenState(value: unknown): SidebarSectionOpenState {
+  const next = createDefaultSidebarSectionOpenState();
+  if (!value || typeof value !== "object") {
+    return next;
+  }
+  const payload = value as Partial<Record<SidebarSectionId, unknown>>;
+  for (const sectionId of DEFAULT_SIDEBAR_ORDER) {
+    const raw = payload[sectionId];
+    if (typeof raw === "boolean") {
+      next[sectionId] = raw;
+    }
+  }
+  return next;
+}
+
+function loadSidebarSectionOpenStateFromStorage(): SidebarSectionOpenState {
+  if (typeof window === "undefined") {
+    return createDefaultSidebarSectionOpenState();
+  }
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_SECTION_OPEN_STORAGE_KEY);
+    if (!raw) {
+      return createDefaultSidebarSectionOpenState();
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    return sanitizeSidebarSectionOpenState(parsed);
+  } catch {
+    return createDefaultSidebarSectionOpenState();
+  }
 }
 
 function isHexColor(value: string): boolean {
@@ -620,7 +666,11 @@ function App() {
   const [editMode, setEditMode] = useState<EditMode>("custom");
   const [topMenu, setTopMenu] = useState<TopMenu>("editor");
   const [sidebarOrder, setSidebarOrder] = useState<SidebarSectionId[]>([...DEFAULT_SIDEBAR_ORDER]);
+  const [sidebarSectionOpen, setSidebarSectionOpen] = useState<SidebarSectionOpenState>(
+    loadSidebarSectionOpenStateFromStorage
+  );
   const [draggingSidebarSection, setDraggingSidebarSection] = useState<SidebarSectionId | null>(null);
+  const [sidebarDropPreview, setSidebarDropPreview] = useState<SidebarDropPreview | null>(null);
   const [themeSettings, setThemeSettings] = useState<ThemeSettings>({ ...DEFAULT_THEME });
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [model, setModel] = useState("");
@@ -741,11 +791,15 @@ function App() {
       window.localStorage.setItem(EDIT_MODE_STORAGE_KEY, editMode);
       window.localStorage.setItem(TOP_MENU_STORAGE_KEY, topMenu);
       window.localStorage.setItem(SIDEBAR_ORDER_STORAGE_KEY, JSON.stringify(sidebarOrder));
+      window.localStorage.setItem(
+        SIDEBAR_SECTION_OPEN_STORAGE_KEY,
+        JSON.stringify(sidebarSectionOpen)
+      );
       window.localStorage.setItem(THEME_STORAGE_KEY, JSON.stringify(themeSettings));
     } catch {
       // Ignore browser storage failures.
     }
-  }, [preferencesLoaded, editMode, topMenu, sidebarOrder, themeSettings]);
+  }, [preferencesLoaded, editMode, topMenu, sidebarOrder, sidebarSectionOpen, themeSettings]);
 
   useEffect(() => {
     if (!preferencesLoaded) {
@@ -1150,44 +1204,177 @@ function App() {
     }
   }
 
+  function onSidebarSectionToggle(
+    event: SyntheticEvent<HTMLDetailsElement>,
+    sectionId: SidebarSectionId
+  ): void {
+    const nextOpen = event.currentTarget.open;
+    setSidebarSectionOpen((previous) => {
+      if (previous[sectionId] === nextOpen) {
+        return previous;
+      }
+      const next = { ...previous, [sectionId]: nextOpen };
+      try {
+        window.localStorage.setItem(SIDEBAR_SECTION_OPEN_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore browser storage failures.
+      }
+      return next;
+    });
+  }
+
   function onSidebarSectionDragStart(
     event: DragEvent<HTMLElement>,
     sectionId: SidebarSectionId
   ): void {
     setDraggingSidebarSection(sectionId);
+    setSidebarDropPreview(null);
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", sectionId);
   }
 
-  function onSidebarSectionDragOver(event: DragEvent<HTMLElement>): void {
+  function onSidebarSectionDragStartCapture(event: DragEvent<HTMLElement>): void {
+    const target = event.target;
+    if (target instanceof HTMLElement && target.closest(".drag-handle")) {
+      return;
+    }
+    event.preventDefault();
+  }
+
+  function resolveSidebarDragSource(event: DragEvent<HTMLElement>): SidebarSectionId | null {
+    const transferred = event.dataTransfer.getData("text/plain");
+    const sourceId = isSidebarSectionValue(transferred) ? transferred : draggingSidebarSection;
+    return sourceId || null;
+  }
+
+  function resolveSidebarDropPlacement(event: DragEvent<HTMLElement>): "before" | "after" {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const midpoint = bounds.top + bounds.height / 2;
+    return event.clientY < midpoint ? "before" : "after";
+  }
+
+  function computeSidebarReorder(
+    order: SidebarSectionId[],
+    sourceId: SidebarSectionId,
+    targetId: SidebarSectionId,
+    placement: "before" | "after"
+  ): SidebarSectionId[] | null {
+    if (sourceId === targetId) {
+      return null;
+    }
+
+    const sourceIndex = order.indexOf(sourceId);
+    const targetIndex = order.indexOf(targetId);
+    if (sourceIndex < 0 || targetIndex < 0) {
+      return null;
+    }
+
+    const next = [...order];
+    next.splice(sourceIndex, 1);
+
+    const normalizedTargetIndex = next.indexOf(targetId);
+    if (normalizedTargetIndex < 0) {
+      return null;
+    }
+
+    const insertionIndex = placement === "after" ? normalizedTargetIndex + 1 : normalizedTargetIndex;
+    next.splice(insertionIndex, 0, sourceId);
+    const changed = next.some((item, index) => item !== order[index]);
+    return changed ? next : null;
+  }
+
+  function moveSidebarSection(
+    sourceId: SidebarSectionId,
+    targetId: SidebarSectionId,
+    placement: "before" | "after"
+  ): void {
+    setSidebarOrder((previous) => {
+      const next = computeSidebarReorder(previous, sourceId, targetId, placement);
+      return next || previous;
+    });
+  }
+
+  function onSidebarSectionDragOver(
+    event: DragEvent<HTMLElement>,
+    targetId: SidebarSectionId
+  ): void {
+    const sourceId = resolveSidebarDragSource(event);
+    if (!sourceId || sourceId === targetId) {
+      setSidebarDropPreview(null);
+      return;
+    }
+    const placement = resolveSidebarDropPlacement(event);
+    if (!computeSidebarReorder(sidebarOrder, sourceId, targetId, placement)) {
+      setSidebarDropPreview(null);
+      return;
+    }
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
+    setSidebarDropPreview((previous) =>
+      previous?.targetId === targetId && previous.placement === placement
+        ? previous
+        : { targetId, placement }
+    );
   }
 
   function onSidebarSectionDrop(event: DragEvent<HTMLElement>, targetId: SidebarSectionId): void {
-    event.preventDefault();
-    const transferred = event.dataTransfer.getData("text/plain");
-    const sourceId = isSidebarSectionValue(transferred) ? transferred : draggingSidebarSection;
+    const sourceId = resolveSidebarDragSource(event);
     if (!sourceId || sourceId === targetId) {
+      setDraggingSidebarSection(null);
+      setSidebarDropPreview(null);
       return;
     }
-
-    setSidebarOrder((previous) => {
-      const next = [...previous];
-      const sourceIndex = next.indexOf(sourceId);
-      const targetIndex = next.indexOf(targetId);
-      if (sourceIndex < 0 || targetIndex < 0) {
-        return previous;
-      }
-      next.splice(sourceIndex, 1);
-      next.splice(targetIndex, 0, sourceId);
-      return next;
-    });
+    event.preventDefault();
+    const preview = sidebarDropPreview?.targetId === targetId ? sidebarDropPreview : null;
+    const placement = preview ? preview.placement : resolveSidebarDropPlacement(event);
+    moveSidebarSection(sourceId, targetId, placement);
     setDraggingSidebarSection(null);
+    setSidebarDropPreview(null);
+  }
+
+  function onSidebarGhostDragOver(
+    event: DragEvent<HTMLElement>,
+    targetId: SidebarSectionId,
+    placement: "before" | "after"
+  ): void {
+    const sourceId = resolveSidebarDragSource(event);
+    if (!sourceId || sourceId === targetId) {
+      setSidebarDropPreview(null);
+      return;
+    }
+    if (!computeSidebarReorder(sidebarOrder, sourceId, targetId, placement)) {
+      setSidebarDropPreview(null);
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setSidebarDropPreview((previous) =>
+      previous?.targetId === targetId && previous.placement === placement
+        ? previous
+        : { targetId, placement }
+    );
+  }
+
+  function onSidebarGhostDrop(
+    event: DragEvent<HTMLElement>,
+    targetId: SidebarSectionId,
+    placement: "before" | "after"
+  ): void {
+    const sourceId = resolveSidebarDragSource(event);
+    if (!sourceId || sourceId === targetId) {
+      setDraggingSidebarSection(null);
+      setSidebarDropPreview(null);
+      return;
+    }
+    event.preventDefault();
+    moveSidebarSection(sourceId, targetId, placement);
+    setDraggingSidebarSection(null);
+    setSidebarDropPreview(null);
   }
 
   function onSidebarSectionDragEnd(): void {
     setDraggingSidebarSection(null);
+    setSidebarDropPreview(null);
   }
 
   function onResetThemeDefaults(): void {
@@ -1444,7 +1631,7 @@ function App() {
 
   return (
     <div className="app app-shell" style={appThemeStyle}>
-      <aside className="sidebar">
+      <aside className="sidebar" onDragStartCapture={onSidebarSectionDragStartCapture}>
         <header className="sidebar-header">
           <h1>Doc Editing Application</h1>
           <p className="subtle">{status}</p>
@@ -1456,32 +1643,59 @@ function App() {
 
         {error && <p className="error">{error}</p>}
 
-        {visibleSidebarSections.map((sectionId) => (
-          <details
-            key={sectionId}
-            className={`sidebar-section ${draggingSidebarSection === sectionId ? "sidebar-section-dragging" : ""}`}
-            open
-            draggable
-            onDragStart={(event) => onSidebarSectionDragStart(event, sectionId)}
-            onDragOver={onSidebarSectionDragOver}
-            onDrop={(event) => onSidebarSectionDrop(event, sectionId)}
-            onDragEnd={onSidebarSectionDragEnd}
-          >
-            <summary className="sidebar-section-summary">
-              <span>
-                {sectionId === "workflow" && "Workflow"}
-                {sectionId === "documents" && "Documents"}
-                {sectionId === "prompt" && "Prompt"}
-                {sectionId === "changes" && "Suggestions"}
-                {sectionId === "context" && "Context Files"}
-                {sectionId === "workspace" && "Workspace Controls"}
-                {sectionId === "direct" && "Manual Typing"}
-                {sectionId === "ai" && "AI Settings"}
-                {sectionId === "appearance" && "Appearance"}
-              </span>
-              <span className="drag-hint">Drag</span>
-            </summary>
-            <div className="sidebar-section-body">
+        {visibleSidebarSections.map((sectionId) => {
+          const showDropBefore =
+            sidebarDropPreview?.targetId === sectionId && sidebarDropPreview.placement === "before";
+          const showDropAfter =
+            sidebarDropPreview?.targetId === sectionId && sidebarDropPreview.placement === "after";
+
+          return (
+            <Fragment key={sectionId}>
+              {showDropBefore && (
+                <div
+                  className="sidebar-drop-ghost"
+                  onDragOver={(event) => onSidebarGhostDragOver(event, sectionId, "before")}
+                  onDrop={(event) => onSidebarGhostDrop(event, sectionId, "before")}
+                >
+                  Drop Here
+                </div>
+              )}
+              <details
+                className={`sidebar-section ${draggingSidebarSection === sectionId ? "sidebar-section-dragging" : ""}`}
+                open={sidebarSectionOpen[sectionId]}
+                onToggle={(event) => onSidebarSectionToggle(event, sectionId)}
+                onDragOver={(event) => onSidebarSectionDragOver(event, sectionId)}
+                onDrop={(event) => onSidebarSectionDrop(event, sectionId)}
+              >
+                <summary className="sidebar-section-summary">
+                  <span>
+                    {sectionId === "workflow" && "Workflow"}
+                    {sectionId === "documents" && "Documents"}
+                    {sectionId === "prompt" && "Prompt"}
+                    {sectionId === "changes" && "Suggestions"}
+                    {sectionId === "context" && "Context Files"}
+                    {sectionId === "workspace" && "Workspace Controls"}
+                    {sectionId === "direct" && "Manual Typing"}
+                    {sectionId === "ai" && "AI Settings"}
+                    {sectionId === "appearance" && "Appearance"}
+                  </span>
+                  <button
+                    type="button"
+                    className="drag-hint drag-handle"
+                    draggable
+                    onDragStart={(event) => onSidebarSectionDragStart(event, sectionId)}
+                    onDragEnd={onSidebarSectionDragEnd}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                    }}
+                    aria-label="Drag section"
+                  >
+                    Drag
+                  </button>
+                </summary>
+                <div className="sidebar-section-body">
               {sectionId === "workflow" && (
                 <div className="stack">
                   <label>
@@ -1927,9 +2141,20 @@ function App() {
                   </button>
                 </div>
               )}
-            </div>
-          </details>
-        ))}
+                </div>
+              </details>
+              {showDropAfter && (
+                <div
+                  className="sidebar-drop-ghost"
+                  onDragOver={(event) => onSidebarGhostDragOver(event, sectionId, "after")}
+                  onDrop={(event) => onSidebarGhostDrop(event, sectionId, "after")}
+                >
+                  Drop Here
+                </div>
+              )}
+            </Fragment>
+          );
+        })}
       </aside>
 
       <main className="main-stage">
