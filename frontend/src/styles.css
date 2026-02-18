@@ -270,6 +270,13 @@ button:disabled {
   border-color: #67bfff;
 }
 
+.download-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
 .remember-toggle {
   display: inline-flex;
   align-items: center;
