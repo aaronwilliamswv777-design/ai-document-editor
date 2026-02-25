@@ -6,4 +6,9 @@ build/
 .DS_Store
 *.log
 backend/uploads/
-
+~$*.docx
+~$*.doc
+~$*.xlsx
+~$*.xls
+~$*.pptx
+~$*.ppt
