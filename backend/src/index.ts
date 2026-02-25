@@ -4,7 +4,7 @@ import express from "express";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
-import { diffChars, diffWords } from "diff";
+import { diffWords } from "diff";
 import { createSession, deleteSession, getSession, updateSession } from "./sessionStore.js";
 import {
   applyEditsToDocxBuffer,
@@ -18,7 +18,7 @@ import {
   loadSavedWorkspaceSnapshot,
   saveWorkspaceSnapshot
 } from "./services/workspaceSaveService.js";
-import { ProposalBatch } from "./types.js";
+import { EditStatus, ProposalBatch, WordChange } from "./types.js";
 
 const app = express();
 const port = Number(process.env.PORT || 8080);
@@ -45,7 +45,8 @@ const grammarAnalyzeSchema = z.object({
 });
 
 const decisionSchema = z.object({
-  decision: z.enum(["accept", "reject"])
+  decision: z.enum(["accept", "reject"]),
+  wordChangeIndex: z.number().int().min(0).optional()
 });
 
 const manualEditSchema = z.object({
@@ -199,13 +200,6 @@ function isGrammarSafeEdit(
   return true;
 }
 
-function normalizeSnippet(value: string): string {
-  return value
-    .replace(/\u00a0/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function extractAtomicTokens(value: string): string[] {
   const matches = value.match(/[A-Za-z0-9']+|[.,;:!?]/g);
   if (!matches) {
@@ -214,61 +208,221 @@ function extractAtomicTokens(value: string): string[] {
   return matches.map((token) => token.trim()).filter(Boolean);
 }
 
-function deriveHighlightTexts(originalText: string, proposedText: string): string[] {
-  const snippets: string[] = [];
-  const seen = new Set<string>();
+type TokenSpan = {
+  value: string;
+  start: number;
+  end: number;
+};
 
-  const pushSnippet = (value: string): void => {
-    const normalized = normalizeSnippet(value).slice(0, 40);
-    if (!normalized) {
-      return;
+function extractAtomicTokenSpans(value: string): TokenSpan[] {
+  const spans: TokenSpan[] = [];
+  const tokenPattern = /[A-Za-z0-9']+|[.,;:!?]/g;
+  let match: RegExpExecArray | null = tokenPattern.exec(value);
+  while (match) {
+    const token = (match[0] || "").trim();
+    if (token) {
+      spans.push({
+        value: token,
+        start: match.index,
+        end: match.index + token.length
+      });
     }
-    const dedupeKey = normalized.toLowerCase();
-    if (seen.has(dedupeKey)) {
-      return;
+    match = tokenPattern.exec(value);
+  }
+  return spans;
+}
+
+function deriveWordChanges(originalText: string, proposedText: string): WordChange[] {
+  const changes: WordChange[] = [];
+  const parts = diffWords(originalText, proposedText);
+  let cursor = 0;
+  let index = 0;
+
+  while (index < parts.length) {
+    const part = parts[index];
+    if (!part.added && !part.removed) {
+      cursor += part.value.length;
+      index += 1;
+      continue;
     }
-    seen.add(dedupeKey);
-    snippets.push(normalized);
+
+    const clusterStart = cursor;
+    let removedSegment = "";
+    let addedSegment = "";
+
+    while (index < parts.length) {
+      const nextPart = parts[index];
+      if (!nextPart.added && !nextPart.removed) {
+        break;
+      }
+      if (nextPart.removed) {
+        removedSegment += nextPart.value;
+        cursor += nextPart.value.length;
+      } else if (nextPart.added) {
+        addedSegment += nextPart.value;
+      }
+      index += 1;
+    }
+
+    const removedTokens = extractAtomicTokenSpans(removedSegment);
+    if (removedTokens.length === 0) {
+      continue;
+    }
+
+    const addedTokens = extractAtomicTokens(addedSegment);
+    for (let tokenIndex = 0; tokenIndex < removedTokens.length; tokenIndex += 1) {
+      const removedToken = removedTokens[tokenIndex];
+      changes.push({
+        from: removedToken.value,
+        to: addedTokens[tokenIndex] || addedTokens[addedTokens.length - 1] || "(removed)",
+        start: clusterStart + removedToken.start,
+        end: clusterStart + removedToken.end
+      });
+    }
+  }
+
+  return changes;
+}
+
+function deriveHighlightTexts(wordChanges: WordChange[]): string[] {
+  return wordChanges.map((change) => change.from).filter((value) => value.length > 0);
+}
+
+function isWordToken(value: string): boolean {
+  return /^[A-Za-z0-9']+$/.test(value);
+}
+
+function isWordChar(value: string): boolean {
+  return /[A-Za-z0-9']/.test(value);
+}
+
+function hasTokenBoundaries(text: string, start: number, token: string): boolean {
+  if (!isWordToken(token)) {
+    return true;
+  }
+  const end = start + token.length;
+  const prev = start > 0 ? text[start - 1] : "";
+  const next = end < text.length ? text[end] : "";
+  return (!prev || !isWordChar(prev)) && (!next || !isWordChar(next));
+}
+
+function collectTokenStarts(text: string, token: string, ignoreCase: boolean): number[] {
+  if (!token.length) {
+    return [];
+  }
+  const haystack = ignoreCase ? text.toLowerCase() : text;
+  const needle = ignoreCase ? token.toLowerCase() : token;
+  const starts: number[] = [];
+  let cursor = 0;
+
+  while (cursor <= haystack.length - needle.length) {
+    const index = haystack.indexOf(needle, cursor);
+    if (index < 0) {
+      break;
+    }
+    starts.push(index);
+    cursor = index + 1;
+  }
+
+  return starts;
+}
+
+function findBestTokenStart(text: string, token: string, expectedStart: number): number {
+  if (!token.length) {
+    return -1;
+  }
+
+  const tryDirect = (ignoreCase: boolean): number => {
+    if (expectedStart < 0 || expectedStart + token.length > text.length) {
+      return -1;
+    }
+    const slice = text.slice(expectedStart, expectedStart + token.length);
+    const matched = ignoreCase ? slice.toLowerCase() === token.toLowerCase() : slice === token;
+    if (!matched || !hasTokenBoundaries(text, expectedStart, token)) {
+      return -1;
+    }
+    return expectedStart;
   };
 
-  const wordParts = diffWords(originalText, proposedText);
-  for (const part of wordParts) {
-    if (part.removed) {
-      for (const token of extractAtomicTokens(part.value)) {
-        pushSnippet(token);
-      }
+  const exactDirect = tryDirect(false);
+  if (exactDirect >= 0) {
+    return exactDirect;
+  }
+  const caseInsensitiveDirect = tryDirect(true);
+  if (caseInsensitiveDirect >= 0) {
+    return caseInsensitiveDirect;
+  }
+
+  const boundaryCandidates = (
+    candidates: number[]
+  ): number[] => candidates.filter((start) => hasTokenBoundaries(text, start, token));
+
+  const exactCandidates = boundaryCandidates(collectTokenStarts(text, token, false));
+  const candidates =
+    exactCandidates.length > 0
+      ? exactCandidates
+      : boundaryCandidates(collectTokenStarts(text, token, true));
+  if (candidates.length === 0) {
+    return -1;
+  }
+
+  let best = candidates[0];
+  let bestDistance = Math.abs(best - expectedStart);
+  for (let index = 1; index < candidates.length; index += 1) {
+    const start = candidates[index];
+    const distance = Math.abs(start - expectedStart);
+    if (distance < bestDistance || (distance === bestDistance && start < best)) {
+      best = start;
+      bestDistance = distance;
     }
   }
 
-  if (snippets.length === 0) {
-    for (const part of wordParts) {
-      if (part.added) {
-        for (const token of extractAtomicTokens(part.value)) {
-          pushSnippet(token);
-        }
-      }
+  return best;
+}
+
+function normalizeWordChangeStatuses(wordChanges: WordChange[], existing?: EditStatus[]): EditStatus[] {
+  if (
+    Array.isArray(existing) &&
+    existing.length === wordChanges.length &&
+    existing.every((item) => item === "pending" || item === "accepted" || item === "rejected")
+  ) {
+    return [...existing];
+  }
+  return wordChanges.map(() => "pending");
+}
+
+function applySingleWordChange(
+  currentText: string,
+  change: WordChange,
+  allWordChanges: WordChange[],
+  statuses: EditStatus[]
+): string | null {
+  const replacement = change.to === "(removed)" ? "" : change.to;
+  let delta = 0;
+  for (let index = 0; index < allWordChanges.length; index += 1) {
+    const priorChange = allWordChanges[index];
+    if (statuses[index] !== "accepted" || priorChange.start >= change.start) {
+      continue;
     }
+    const priorReplacement = priorChange.to === "(removed)" ? "" : priorChange.to;
+    delta += priorReplacement.length - priorChange.from.length;
   }
 
-  if (snippets.length === 0) {
-    const charParts = diffChars(originalText, proposedText);
-    for (const part of charParts) {
-      if (part.removed || part.added) {
-        for (const token of extractAtomicTokens(part.value)) {
-          pushSnippet(token);
-        }
-      }
-    }
+  const expectedStart = change.start + delta;
+  const start = findBestTokenStart(currentText, change.from, expectedStart);
+  if (start < 0) {
+    return null;
   }
 
-  if (snippets.length === 0) {
-    const fallback = extractAtomicTokens(originalText)[0];
-    if (fallback) {
-      pushSnippet(fallback);
-    }
-  }
+  const end = start + change.from.length;
+  return `${currentText.slice(0, start)}${replacement}${currentText.slice(end)}`;
+}
 
-  return snippets.slice(0, 12);
+function resolveStatusFromWordChanges(statuses: EditStatus[]): EditStatus {
+  if (statuses.some((status) => status === "pending")) {
+    return "pending";
+  }
+  return statuses.some((status) => status === "accepted") ? "accepted" : "rejected";
 }
 
 async function acceptPendingEditsForSession(session: NonNullable<ReturnType<typeof getSession>>): Promise<number> {
@@ -287,6 +441,9 @@ async function acceptPendingEditsForSession(session: NonNullable<ReturnType<type
   const updates: Array<{ blockId: string; text: string }> = [];
   for (const edit of pendingEdits) {
     edit.status = "accepted";
+    if (Array.isArray(edit.wordChanges) && edit.wordChanges.length > 0) {
+      edit.wordChangeStatuses = edit.wordChanges.map(() => "accepted");
+    }
     const block = session.workingBlocks.find((item) => item.id === edit.blockId);
     if (block) {
       block.text = edit.proposedText;
@@ -650,12 +807,18 @@ app.post("/api/session/:id/propose-edits", async (req, res) => {
       model: modelResponse.model,
       edits: modelResponse.edits.map((edit) => {
         const originalText = blockMap.get(edit.blockId)?.text || "";
+        const wordChanges = deriveWordChanges(originalText, edit.proposedText);
+        const highlightTexts = deriveHighlightTexts(wordChanges);
         return {
           id: uuidv4(),
           blockId: edit.blockId,
           originalText,
           proposedText: edit.proposedText,
           rationale: edit.rationale,
+          wordChanges,
+          wordChangeStatuses: wordChanges.map(() => "pending" as EditStatus),
+          highlightText: highlightTexts[0],
+          highlightTexts,
           status: "pending",
           diffHtml: buildDiffHtml(originalText, edit.proposedText)
         };
@@ -723,13 +886,16 @@ app.post("/api/session/:id/analyze-grammar", async (req, res) => {
       model: modelResponse.model,
       edits: safeEdits.map((edit) => {
         const originalText = blockMap.get(edit.blockId)?.text || "";
-        const highlightTexts = deriveHighlightTexts(originalText, edit.proposedText);
+        const wordChanges = deriveWordChanges(originalText, edit.proposedText);
+        const highlightTexts = deriveHighlightTexts(wordChanges);
         return {
           id: uuidv4(),
           blockId: edit.blockId,
           originalText,
           proposedText: edit.proposedText,
           rationale: edit.rationale,
+          wordChanges,
+          wordChangeStatuses: wordChanges.map(() => "pending" as EditStatus),
           highlightText: highlightTexts[0],
           highlightTexts,
           status: "pending",
@@ -779,40 +945,120 @@ app.post("/api/session/:id/edits/:editId/decision", async (req, res) => {
     if (!targetEdit) {
       return res.status(404).json({ error: "Edit proposal not found." });
     }
-    if (targetEdit.status !== "pending") {
+
+    const batch = session.proposalHistory.find((item) => item.id === targetEdit!.batchId)!;
+    const editRecord = batch.edits[targetEdit.indexInBatch];
+
+    if (editRecord.status !== "pending") {
       return res.status(409).json({ error: "This edit has already been decided." });
     }
 
-    const batch = session.proposalHistory.find((item) => item.id === targetEdit!.batchId)!;
-    batch.edits[targetEdit.indexInBatch].status =
-      payload.decision === "accept" ? "accepted" : "rejected";
-
-    if (payload.decision === "accept") {
-      const block = session.workingBlocks.find((item) => item.id === targetEdit!.blockId);
-      if (block) {
-        block.text = targetEdit.proposedText;
+    const requestedWordIndex = payload.wordChangeIndex;
+    if (
+      typeof requestedWordIndex === "number" &&
+      (!Array.isArray(editRecord.wordChanges) || editRecord.wordChanges.length === 0)
+    ) {
+      const derivedWordChanges = deriveWordChanges(editRecord.originalText, editRecord.proposedText);
+      if (derivedWordChanges.length > 0) {
+        editRecord.wordChanges = derivedWordChanges;
+        editRecord.wordChangeStatuses = normalizeWordChangeStatuses(
+          derivedWordChanges,
+          editRecord.wordChangeStatuses
+        );
       }
-      if (!session.workingDocxBuffer) {
-        return res.status(400).json({ error: "Working document buffer is missing." });
+    }
+
+    const hasWordChanges = Array.isArray(editRecord.wordChanges) && editRecord.wordChanges.length > 0;
+    const useWordLevelDecision =
+      typeof requestedWordIndex === "number" &&
+      Number.isInteger(requestedWordIndex) &&
+      hasWordChanges;
+
+    if (typeof requestedWordIndex === "number" && !useWordLevelDecision) {
+      return res.status(400).json({ error: "This edit does not support word-level decisions." });
+    }
+
+    if (useWordLevelDecision) {
+      const wordChanges = editRecord.wordChanges!;
+      if (requestedWordIndex < 0 || requestedWordIndex >= wordChanges.length) {
+        return res.status(400).json({ error: "wordChangeIndex is out of range." });
       }
 
-      session.workingDocxBuffer = await applyEditsToDocxBuffer({
-        buffer: session.workingDocxBuffer,
-        updates: [
-          {
-            blockId: targetEdit.blockId,
-            text: targetEdit.proposedText
-          }
-        ],
-        bindings: session.blockBindings
-      });
+      const statuses = normalizeWordChangeStatuses(wordChanges, editRecord.wordChangeStatuses);
+      if (statuses[requestedWordIndex] !== "pending") {
+        return res.status(409).json({ error: "This word change has already been decided." });
+      }
+
+      statuses[requestedWordIndex] = payload.decision === "accept" ? "accepted" : "rejected";
+      editRecord.wordChangeStatuses = statuses;
+
+      if (payload.decision === "accept") {
+        const block = session.workingBlocks.find((item) => item.id === editRecord.blockId);
+        if (!block) {
+          return res.status(404).json({ error: "Document block for this edit was not found." });
+        }
+        if (!session.workingDocxBuffer) {
+          return res.status(400).json({ error: "Working document buffer is missing." });
+        }
+
+        const change = wordChanges[requestedWordIndex];
+        const nextText = applySingleWordChange(block.text, change, wordChanges, statuses);
+        if (nextText === null) {
+          return res.status(409).json({
+            error: `Couldn't locate "${change.from}" in the current text for a word-level apply.`
+          });
+        }
+
+        block.text = nextText;
+        session.workingDocxBuffer = await applyEditsToDocxBuffer({
+          buffer: session.workingDocxBuffer,
+          updates: [
+            {
+              blockId: editRecord.blockId,
+              text: nextText
+            }
+          ],
+          bindings: session.blockBindings
+        });
+      }
+
+      editRecord.status = resolveStatusFromWordChanges(statuses);
+    } else {
+      editRecord.status = payload.decision === "accept" ? "accepted" : "rejected";
+      if (hasWordChanges) {
+        editRecord.wordChangeStatuses = editRecord.wordChanges!.map(() =>
+          payload.decision === "accept" ? "accepted" : "rejected"
+        );
+      }
+
+      if (payload.decision === "accept") {
+        const block = session.workingBlocks.find((item) => item.id === editRecord.blockId);
+        if (block) {
+          block.text = editRecord.proposedText;
+        }
+        if (!session.workingDocxBuffer) {
+          return res.status(400).json({ error: "Working document buffer is missing." });
+        }
+
+        session.workingDocxBuffer = await applyEditsToDocxBuffer({
+          buffer: session.workingDocxBuffer,
+          updates: [
+            {
+              blockId: editRecord.blockId,
+              text: editRecord.proposedText
+            }
+          ],
+          bindings: session.blockBindings
+        });
+      }
     }
 
     updateSession(session);
 
     return res.json({
       editId: targetEdit.id,
-      decision: payload.decision
+      decision: payload.decision,
+      wordChangeIndex: requestedWordIndex
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

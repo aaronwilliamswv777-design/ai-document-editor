@@ -159,14 +159,18 @@ export async function fetchProviderModels(payload: {
 export async function decideEdit(
   sessionId: string,
   editId: string,
-  decision: "accept" | "reject"
+  decision: "accept" | "reject",
+  wordChangeIndex?: number
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/api/session/${sessionId}/edits/${editId}/decision`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ decision })
+    body: JSON.stringify({
+      decision,
+      ...(typeof wordChangeIndex === "number" ? { wordChangeIndex } : {})
+    })
   });
   await parseJson(response);
 }

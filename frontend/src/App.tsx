@@ -93,10 +93,11 @@ type GrammarHighlight = {
   blockId: string;
   blockText: string;
   targetText: string;
-  rationale: string;
-  suggestionSentence: string;
+  replacementText: string;
   tooltip: string;
   hintIndex: number;
+  targetOffset?: number;
+  wordChangeIndex?: number;
 };
 
 function formatDate(iso: string): string {
@@ -411,11 +412,110 @@ function bindEditablePreviewBlocks(
 }
 
 function extractAtomicHighlightTargets(value: string): string[] {
-  const matches = value.match(/[A-Za-z0-9']+|[.,;:!?]/g);
-  if (!matches) {
+  return extractAtomicTokenSpans(value).map((item) => item.value);
+}
+
+type TokenSpan = {
+  value: string;
+  start: number;
+  end: number;
+};
+
+function extractAtomicTokenSpans(value: string): TokenSpan[] {
+  const spans: TokenSpan[] = [];
+  const tokenPattern = /[A-Za-z0-9']+|[.,;:!?]/g;
+  let match: RegExpExecArray | null = tokenPattern.exec(value);
+  while (match) {
+    const token = (match[0] || "").trim();
+    if (token) {
+      spans.push({
+        value: token,
+        start: match.index,
+        end: match.index + token.length
+      });
+    }
+    match = tokenPattern.exec(value);
+  }
+  return spans;
+}
+
+function deriveWordChangesFromDiffHtml(diffHtml: string): Array<{
+  from: string;
+  to: string;
+  start: number;
+  end: number;
+}> {
+  if (!diffHtml.trim()) {
     return [];
   }
-  return matches.map((item) => item.trim()).filter(Boolean);
+
+  const parser = new DOMParser();
+  const parsed = parser.parseFromString(`<div>${diffHtml}</div>`, "text/html");
+  const root = parsed.body.firstElementChild;
+  if (!root) {
+    return [];
+  }
+
+  const parts = Array.from(root.querySelectorAll("span")).map((node) => ({
+    value: node.textContent || "",
+    added: node.classList.contains("diff-added"),
+    removed: node.classList.contains("diff-removed")
+  }));
+
+  const changes: Array<{
+    from: string;
+    to: string;
+    start: number;
+    end: number;
+  }> = [];
+
+  let cursor = 0;
+  let index = 0;
+
+  while (index < parts.length) {
+    const part = parts[index];
+    if (!part.added && !part.removed) {
+      cursor += part.value.length;
+      index += 1;
+      continue;
+    }
+
+    const clusterStart = cursor;
+    let removedSegment = "";
+    let addedSegment = "";
+
+    while (index < parts.length) {
+      const next = parts[index];
+      if (!next.added && !next.removed) {
+        break;
+      }
+      if (next.removed) {
+        removedSegment += next.value;
+        cursor += next.value.length;
+      } else if (next.added) {
+        addedSegment += next.value;
+      }
+      index += 1;
+    }
+
+    const removedTokens = extractAtomicTokenSpans(removedSegment);
+    if (removedTokens.length === 0) {
+      continue;
+    }
+
+    const addedTokens = extractAtomicHighlightTargets(addedSegment);
+    for (let tokenIndex = 0; tokenIndex < removedTokens.length; tokenIndex += 1) {
+      const removedToken = removedTokens[tokenIndex];
+      changes.push({
+        from: removedToken.value,
+        to: addedTokens[tokenIndex] || addedTokens[addedTokens.length - 1] || "(removed)",
+        start: clusterStart + removedToken.start,
+        end: clusterStart + removedToken.end
+      });
+    }
+  }
+
+  return changes;
 }
 
 function isWordToken(value: string): boolean {
@@ -426,10 +526,10 @@ function isWordChar(value: string): boolean {
   return /[A-Za-z0-9']/.test(value);
 }
 
-function findNeedleStart(fullText: string, needle: string): number {
+function findNeedleStartFrom(fullText: string, needle: string, fromIndex: number): number {
   const loweredText = fullText.toLowerCase();
   const loweredNeedle = needle.toLowerCase();
-  let cursor = 0;
+  let cursor = Math.max(0, Math.min(fromIndex, loweredText.length));
 
   while (cursor <= loweredText.length - loweredNeedle.length) {
     const index = loweredText.indexOf(loweredNeedle, cursor);
@@ -453,50 +553,14 @@ function findNeedleStart(fullText: string, needle: string): number {
   return -1;
 }
 
-function splitIntoSentences(text: string): string[] {
-  const normalized = text
-    .replace(/\u00a0/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!normalized) {
-    return [];
-  }
-
-  const matches = normalized.match(/[^.!?]+[.!?]?/g) || [];
-  const sentences = matches.map((item) => item.trim()).filter(Boolean);
-  return sentences.length > 0 ? sentences : [normalized];
-}
-
-function buildSentenceScopedSuggestion(proposedText: string, targetText: string): string {
-  const sentences = splitIntoSentences(proposedText);
-  if (sentences.length === 0) {
-    return proposedText.trim();
-  }
-
-  const normalizedTarget = normalizeSearchText(targetText);
-  if (normalizedTarget) {
-    const directMatch = sentences.find((sentence) =>
-      normalizeSearchText(sentence).includes(normalizedTarget)
-    );
-    if (directMatch) {
-      return directMatch;
-    }
-
-    const targetTokens = normalizedTarget.split(/\s+/).filter(Boolean);
-    for (const token of targetTokens) {
-      if (token.length < 2) {
-        continue;
-      }
-      const tokenMatch = sentences.find((sentence) =>
-        normalizeSearchText(sentence).includes(token)
-      );
-      if (tokenMatch) {
-        return tokenMatch;
-      }
+function findNeedleStart(fullText: string, needle: string, preferredStart?: number): number {
+  if (typeof preferredStart === "number" && Number.isFinite(preferredStart)) {
+    const hinted = findNeedleStartFrom(fullText, needle, Math.max(0, preferredStart - 24));
+    if (hinted >= 0) {
+      return hinted;
     }
   }
-
-  return sentences[0];
+  return findNeedleStartFrom(fullText, needle, 0);
 }
 
 function applyHighlightToParagraph(paragraph: Element, highlight: GrammarHighlight): boolean {
@@ -511,7 +575,7 @@ function applyHighlightToParagraph(paragraph: Element, highlight: GrammarHighlig
   }
 
   const fullText = textNodes.map((node) => node.nodeValue || "").join("");
-  const start = findNeedleStart(fullText, needle);
+  const start = findNeedleStart(fullText, needle, highlight.targetOffset);
   if (start < 0) {
     return false;
   }
@@ -554,6 +618,7 @@ function applyHighlightToParagraph(paragraph: Element, highlight: GrammarHighlig
   marker.className = "grammar-issue-highlight";
   marker.setAttribute("data-grammar-tooltip", highlight.tooltip);
   marker.setAttribute("aria-label", highlight.tooltip);
+  marker.setAttribute("title", highlight.tooltip);
 
   try {
     range.surroundContents(marker);
@@ -574,28 +639,28 @@ function applyHighlightToParagraph(paragraph: Element, highlight: GrammarHighlig
 
   const issueType = document.createElement("span");
   issueType.className = "grammar-inline-popover-type";
-  issueType.textContent = highlight.mode === "grammar" ? "Grammar issue" : "Suggested edit";
+  issueType.textContent = highlight.mode === "grammar" ? "Grammar change" : "Targeted change";
   popover.appendChild(issueType);
 
-  const reasonLabel = document.createElement("span");
-  reasonLabel.className = "grammar-inline-popover-label";
-  reasonLabel.textContent = "Reason";
-  popover.appendChild(reasonLabel);
+  const originalLabel = document.createElement("span");
+  originalLabel.className = "grammar-inline-popover-label";
+  originalLabel.textContent = "Original";
+  popover.appendChild(originalLabel);
 
-  const reasonValue = document.createElement("span");
-  reasonValue.className = "grammar-inline-popover-body";
-  reasonValue.textContent = highlight.rationale;
-  popover.appendChild(reasonValue);
+  const originalValue = document.createElement("span");
+  originalValue.className = "grammar-inline-popover-body";
+  originalValue.textContent = highlight.targetText;
+  popover.appendChild(originalValue);
 
-  const sentenceLabel = document.createElement("span");
-  sentenceLabel.className = "grammar-inline-popover-label";
-  sentenceLabel.textContent = "Suggested sentence";
-  popover.appendChild(sentenceLabel);
+  const replacementLabel = document.createElement("span");
+  replacementLabel.className = "grammar-inline-popover-label";
+  replacementLabel.textContent = "Changed to";
+  popover.appendChild(replacementLabel);
 
-  const sentenceValue = document.createElement("span");
-  sentenceValue.className = "grammar-inline-popover-body";
-  sentenceValue.textContent = highlight.suggestionSentence;
-  popover.appendChild(sentenceValue);
+  const replacementValue = document.createElement("span");
+  replacementValue.className = "grammar-inline-popover-body";
+  replacementValue.textContent = highlight.replacementText;
+  popover.appendChild(replacementValue);
 
   const actionRow = document.createElement("span");
   actionRow.className = "grammar-inline-actions";
@@ -605,6 +670,9 @@ function applyHighlightToParagraph(paragraph: Element, highlight: GrammarHighlig
   acceptButton.className = "inline-decision-btn inline-decision-accept";
   acceptButton.dataset.inlineDecision = "accept";
   acceptButton.dataset.editId = highlight.editId;
+  if (typeof highlight.wordChangeIndex === "number") {
+    acceptButton.dataset.wordChangeIndex = String(highlight.wordChangeIndex);
+  }
   acceptButton.textContent = "Accept";
   actionRow.appendChild(acceptButton);
 
@@ -613,6 +681,9 @@ function applyHighlightToParagraph(paragraph: Element, highlight: GrammarHighlig
   rejectButton.className = "inline-decision-btn inline-decision-reject";
   rejectButton.dataset.inlineDecision = "reject";
   rejectButton.dataset.editId = highlight.editId;
+  if (typeof highlight.wordChangeIndex === "number") {
+    rejectButton.dataset.wordChangeIndex = String(highlight.wordChangeIndex);
+  }
   rejectButton.textContent = "Reject";
   actionRow.appendChild(rejectButton);
 
@@ -633,8 +704,37 @@ function applyGrammarHighlights(container: HTMLElement, highlights: GrammarHighl
     : Array.from(container.querySelectorAll(".docx *")).filter(
         (element) => normalizeSearchText(element.textContent || "").length > 0
       );
+  const boundBlockElements = Array.from(
+    container.querySelectorAll<HTMLElement>(".docx [data-block-id]")
+  ).reduce((accumulator, element) => {
+    const blockId = element.dataset.blockId;
+    if (!blockId) {
+      return accumulator;
+    }
+    const existing = accumulator.get(blockId);
+    if (existing) {
+      existing.push(element);
+    } else {
+      accumulator.set(blockId, [element]);
+    }
+    return accumulator;
+  }, new Map<string, HTMLElement[]>());
 
   for (const highlight of highlights) {
+    const boundCandidates = boundBlockElements.get(highlight.blockId) || [];
+    if (boundCandidates.length > 0) {
+      let appliedToBound = false;
+      for (const candidate of boundCandidates) {
+        if (applyHighlightToParagraph(candidate, highlight)) {
+          appliedToBound = true;
+          break;
+        }
+      }
+      if (appliedToBound) {
+        continue;
+      }
+    }
+
     let paragraph: Element | undefined;
     const normalizedBlock = normalizeSearchText(highlight.blockText);
     if (normalizedBlock) {
@@ -993,16 +1093,24 @@ function App() {
   }
 
   const onDecide = useCallback(
-    async (editId: string, decision: "accept" | "reject"): Promise<void> => {
+    async (
+      editId: string,
+      decision: "accept" | "reject",
+      wordChangeIndex?: number
+    ): Promise<void> => {
       if (!sessionId) {
         return;
       }
       try {
         setLoading(true);
         setError("");
-        await decideEdit(sessionId, editId, decision);
+        await decideEdit(sessionId, editId, decision, wordChangeIndex);
         await refresh(sessionId);
-        setStatus(`Suggestion ${decision}ed.`);
+        setStatus(
+          typeof wordChangeIndex === "number"
+            ? `Word change ${decision}ed.`
+            : `Suggestion ${decision}ed.`
+        );
       } catch (decisionError) {
         setError(decisionError instanceof Error ? decisionError.message : "Failed to apply decision.");
       } finally {
@@ -1450,12 +1558,8 @@ function App() {
     const blockMap = new Map(state.workingBlocks.map((block) => [block.id, block]));
     const blockIndexById = new Map(state.workingBlocks.map((block, index) => [block.id, index]));
     const highlights: GrammarHighlight[] = [];
-    const seen = new Set<string>();
 
     for (const batch of state.proposalHistory) {
-      if (batch.mode !== "grammar") {
-        continue;
-      }
       for (const edit of batch.edits) {
         if (edit.status !== "pending") {
           continue;
@@ -1464,9 +1568,54 @@ function App() {
         if (!block) {
           continue;
         }
+        const hintIndex = blockIndexById.get(edit.blockId) ?? 0;
+
+        const derivedWordChanges =
+          Array.isArray(edit.wordChanges) && edit.wordChanges.length > 0
+            ? edit.wordChanges
+            : deriveWordChangesFromDiffHtml(edit.diffHtml);
+        const wordChangeStatuses =
+          Array.isArray(edit.wordChangeStatuses) &&
+          edit.wordChangeStatuses.length === derivedWordChanges.length
+            ? edit.wordChangeStatuses
+            : derivedWordChanges.map(() => "pending" as const);
+
+        if (derivedWordChanges.length > 0) {
+          for (let wordChangeIndex = 0; wordChangeIndex < derivedWordChanges.length; wordChangeIndex += 1) {
+            if (wordChangeStatuses[wordChangeIndex] !== "pending") {
+              continue;
+            }
+            const wordChange = derivedWordChanges[wordChangeIndex];
+            const fromToken = typeof wordChange.from === "string" ? wordChange.from.trim() : "";
+            const toTokenRaw = typeof wordChange.to === "string" ? wordChange.to.trim() : "";
+            if (!fromToken) {
+              continue;
+            }
+            const toToken = toTokenRaw || "(removed)";
+            highlights.push({
+              editId: edit.id,
+              mode: batch.mode,
+              blockId: edit.blockId,
+              blockText: block.text,
+              targetText: fromToken,
+              replacementText: toToken,
+              tooltip: `Original: ${fromToken} | Changed to: ${toToken}`,
+              hintIndex,
+              targetOffset:
+                typeof wordChange.start === "number" && Number.isFinite(wordChange.start)
+                  ? wordChange.start
+                  : undefined,
+              wordChangeIndex
+            });
+          }
+          continue;
+        }
+
         const rawTargetTexts = edit.highlightTexts?.length
           ? edit.highlightTexts
-          : [edit.highlightText || edit.originalText];
+          : edit.highlightText
+            ? [edit.highlightText]
+            : [];
 
         const targetTexts = Array.from(
           new Set(
@@ -1482,28 +1631,31 @@ function App() {
         }
 
         for (const targetText of targetTexts) {
-          const key = `${edit.id}:${targetText.toLowerCase()}`;
-          if (seen.has(key)) {
-            continue;
-          }
-          seen.add(key);
-          const sentenceScopedSuggestion = buildSentenceScopedSuggestion(edit.proposedText, targetText);
           highlights.push({
             editId: edit.id,
             mode: batch.mode,
             blockId: edit.blockId,
             blockText: block.text,
             targetText,
-            rationale: edit.rationale,
-            suggestionSentence: sentenceScopedSuggestion,
-            tooltip: `Reason\n${edit.rationale}\n\nSuggested change\n${sentenceScopedSuggestion}`,
-            hintIndex: blockIndexById.get(edit.blockId) ?? 0
+            replacementText: "(changed)",
+            tooltip: `Original: ${targetText} | Changed to: (changed)`,
+            hintIndex
           });
         }
       }
     }
 
-    return highlights;
+    return highlights.sort((left, right) => {
+      if (left.hintIndex !== right.hintIndex) {
+        return right.hintIndex - left.hintIndex;
+      }
+      const leftOffset = left.targetOffset ?? Number.NEGATIVE_INFINITY;
+      const rightOffset = right.targetOffset ?? Number.NEGATIVE_INFINITY;
+      if (leftOffset !== rightOffset) {
+        return rightOffset - leftOffset;
+      }
+      return right.targetText.localeCompare(left.targetText);
+    });
   }, [state]);
 
   useEffect(() => {
@@ -1529,10 +1681,10 @@ function App() {
         }
         previewContainerRef.current.innerHTML = "";
         await renderAsync(fileBuffer, previewContainerRef.current);
+        bindEditablePreviewBlocks(previewContainerRef.current, state.workingBlocks, directEditMode);
         if (!directEditMode) {
           applyGrammarHighlights(previewContainerRef.current, grammarHighlights);
         }
-        bindEditablePreviewBlocks(previewContainerRef.current, state.workingBlocks, directEditMode);
       } catch (renderError) {
         if (!cancelled) {
           setPreviewError(
@@ -1583,10 +1735,18 @@ function App() {
 
         const editId = actionButton.dataset.editId;
         const decision = actionButton.dataset.inlineDecision;
+        const rawWordChangeIndex = actionButton.dataset.wordChangeIndex;
+        const parsedWordChangeIndex =
+          typeof rawWordChangeIndex === "string" && rawWordChangeIndex.length > 0
+            ? Number.parseInt(rawWordChangeIndex, 10)
+            : Number.NaN;
+        const wordChangeIndex = Number.isFinite(parsedWordChangeIndex)
+          ? parsedWordChangeIndex
+          : undefined;
         if (!editId || loading || (decision !== "accept" && decision !== "reject")) {
           return;
         }
-        void onDecide(editId, decision);
+        void onDecide(editId, decision, wordChangeIndex);
         return;
       }
 

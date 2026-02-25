@@ -11,6 +11,13 @@ export type ContextSummary = {
 
 export type EditStatus = "pending" | "accepted" | "rejected";
 
+export type WordChange = {
+  from: string;
+  to: string;
+  start: number;
+  end: number;
+};
+
 export type EditProposal = {
   id: string;
   blockId: string;
@@ -19,6 +26,8 @@ export type EditProposal = {
   rationale: string;
   highlightText?: string;
   highlightTexts?: string[];
+  wordChanges?: WordChange[];
+  wordChangeStatuses?: EditStatus[];
   status: EditStatus;
   diffHtml: string;
 };
