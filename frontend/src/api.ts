@@ -106,7 +106,7 @@ export async function proposeEdits(
     prompt: string;
     provider: Provider;
     model?: string;
-    apiKey?: string;
+    apiKey: string;
   }
 ): Promise<ProposalBatch> {
   const response = await fetch(`${API_BASE}/api/session/${sessionId}/propose-edits`, {
@@ -125,7 +125,7 @@ export async function analyzeGrammar(
     customInstructions?: string;
     provider: Provider;
     model?: string;
-    apiKey?: string;
+    apiKey: string;
   }
 ): Promise<ProposalBatch> {
   const response = await fetch(`${API_BASE}/api/session/${sessionId}/analyze-grammar`, {
@@ -140,7 +140,7 @@ export async function analyzeGrammar(
 
 export async function fetchProviderModels(payload: {
   provider: Provider;
-  apiKey?: string;
+  apiKey: string;
 }): Promise<{
   provider: Provider;
   defaultModel: string;

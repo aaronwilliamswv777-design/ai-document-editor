@@ -34,14 +34,14 @@ const proposeSchema = z.object({
   prompt: z.string().min(3),
   provider: z.enum(["anthropic", "gemini", "openrouter"]).optional(),
   model: z.string().optional(),
-  apiKey: z.string().min(10).optional()
+  apiKey: z.string().min(10)
 });
 
 const grammarAnalyzeSchema = z.object({
   customInstructions: z.string().max(4000).optional(),
   provider: z.enum(["anthropic", "gemini", "openrouter"]).optional(),
   model: z.string().optional(),
-  apiKey: z.string().min(10).optional()
+  apiKey: z.string().min(10)
 });
 
 const decisionSchema = z.object({
@@ -63,7 +63,7 @@ const manualEditSchema = z.object({
 
 const listModelsSchema = z.object({
   provider: z.enum(["anthropic", "gemini", "openrouter"]),
-  apiKey: z.string().min(10).optional()
+  apiKey: z.string().min(10)
 });
 
 function cloneBlocks<T extends { id: string; text: string }>(blocks: T[]): T[] {

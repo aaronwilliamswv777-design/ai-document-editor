@@ -11,7 +11,7 @@ type GenerateArgs = {
   blocks: DocumentBlock[];
   provider: Provider;
   model?: string;
-  apiKey?: string;
+  apiKey: string;
 };
 
 const responseSchema = z.object({
@@ -102,24 +102,13 @@ function normalizeEdits(blocks: DocumentBlock[], edits: ProposedEditOperation[])
   return normalized.slice(0, 20);
 }
 
-function resolveApiKey(provider: Provider, providedApiKey?: string): string {
-  const fromRequest = providedApiKey?.trim();
-  if (fromRequest) {
-    return fromRequest;
+function resolveApiKey(provider: Provider, providedApiKey: string): string {
+  const apiKey = providedApiKey.trim();
+  if (apiKey) {
+    return apiKey;
   }
 
-  const fromEnv =
-    provider === "anthropic"
-      ? process.env.ANTHROPIC_API_KEY
-      : provider === "gemini"
-        ? process.env.GEMINI_API_KEY
-        : process.env.OPENROUTER_API_KEY;
-
-  if (fromEnv?.trim()) {
-    return fromEnv.trim();
-  }
-
-  throw new Error(`Missing API key for provider "${provider}".`);
+  throw new Error(`Missing API key for provider "${provider}". Enter your own key in AI Settings.`);
 }
 
 type ListedModel = {
@@ -209,7 +198,7 @@ async function listOpenRouterModels(apiKey: string): Promise<ListedModel[]> {
 
 export async function listProviderModels(args: {
   provider: Provider;
-  apiKey?: string;
+  apiKey: string;
 }): Promise<{
   provider: Provider;
   models: ListedModel[];

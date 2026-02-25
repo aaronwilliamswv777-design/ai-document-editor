@@ -60,7 +60,6 @@ type ThemeSettings = {
 type PersistedPreferences = {
   provider?: Provider;
   model?: string;
-  apiKeys?: Partial<ProviderKeyMap>;
 };
 const PREFERENCES_STORAGE_KEY = "doc-edit.preferences.v1";
 const REMEMBER_SETTINGS_KEY = "doc-edit.remember-settings.v1";
@@ -844,20 +843,6 @@ function App() {
       if (typeof parsed.model === "string") {
         setModel(parsed.model);
       }
-      if (parsed.apiKeys && typeof parsed.apiKeys === "object") {
-        setApiKeys((prev) => ({
-          anthropic:
-            typeof parsed.apiKeys?.anthropic === "string"
-              ? parsed.apiKeys.anthropic
-              : prev.anthropic,
-          gemini:
-            typeof parsed.apiKeys?.gemini === "string" ? parsed.apiKeys.gemini : prev.gemini,
-          openrouter:
-            typeof parsed.apiKeys?.openrouter === "string"
-              ? parsed.apiKeys.openrouter
-              : prev.openrouter
-        }));
-      }
     } catch {
       // Ignore corrupt local storage.
     } finally {
@@ -876,12 +861,12 @@ function App() {
         return;
       }
 
-      const payload: PersistedPreferences = { provider, model, apiKeys };
+      const payload: PersistedPreferences = { provider, model };
       window.localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(payload));
     } catch {
       // Ignore browser storage failures.
     }
-  }, [preferencesLoaded, rememberPreferences, provider, model, apiKeys]);
+  }, [preferencesLoaded, rememberPreferences, provider, model]);
 
   useEffect(() => {
     if (!preferencesLoaded) {
@@ -1089,7 +1074,7 @@ function App() {
       gemini: "",
       openrouter: ""
     });
-    setStatus("Cleared saved provider, model override, API keys, and model lists for this browser.");
+    setStatus("Cleared saved provider/model settings, model lists, and current API key inputs.");
   }
 
   const onDecide = useCallback(
@@ -2177,7 +2162,7 @@ function App() {
                       onChange={(event) => setRememberPreferences(event.target.checked)}
                       disabled={loading || loadingModels}
                     />
-                    Remember API keys and model on this device
+                    Remember provider and model on this device
                   </label>
 
                   <button
@@ -2247,7 +2232,7 @@ function App() {
                     onClick={onClearSavedPreferences}
                     disabled={loading || loadingModels}
                   >
-                    Clear Saved AI Credentials and Model
+                    Clear Local AI Settings
                   </button>
                 </div>
               )}

@@ -46,7 +46,7 @@ Dockerized web app for human-in-the-loop AI editing of Word documents (`.docx`):
 
 ## Run
 
-1. Copy `.env.example` to `.env` and set provider API keys if needed.
+1. Optional: copy `.env.example` to `.env` if you want to override default model IDs.
 2. Start:
 
 ```bash
@@ -54,6 +54,7 @@ docker compose up --build
 ```
 
 3. Open `http://localhost:5173`.
+4. Enter your own provider API key in the UI (AI Settings) before loading models or running analysis.
 
 ## Notes and Current Constraints
 
