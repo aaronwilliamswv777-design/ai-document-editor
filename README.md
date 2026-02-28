@@ -15,6 +15,16 @@ Dockerized web app for human-in-the-loop AI editing of Word documents (`.docx`):
 - Download the current working copy as a new `.docx`.
 - Optionally promote working copy to session source baseline with explicit confirmation.
 
+## Screenshots
+
+### Main Editor View
+
+![Main Editor View](Screenshots/Screenshot%202026-02-24%20191613.png)
+
+### Preview and Diff View
+
+![Preview and Diff View](Screenshots/Screenshot%202026-02-24%20191657.png)
+
 ## Stack
 
 - Frontend: React + TypeScript + Vite
