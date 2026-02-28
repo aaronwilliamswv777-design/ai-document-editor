@@ -19,11 +19,11 @@ Dockerized web app for human-in-the-loop AI editing of Word documents (`.docx`):
 
 ### Main Editor View
 
-![Main Editor View](Screenshots/Screenshot%202026-02-24%20191613.png)
+![Main Editor View](Screenshots/Screenshot%202026-02-28%20130805.png)
 
 ### Preview and Diff View
 
-![Preview and Diff View](Screenshots/Screenshot%202026-02-24%20191657.png)
+![Preview and Diff View](Screenshots/Screenshot%202026-02-28%20130822.png)
 
 ## Stack
 
